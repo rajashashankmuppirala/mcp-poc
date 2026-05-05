@@ -39,13 +39,9 @@
   #input-area { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; gap: 12px; }
   #prompt { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; color: var(--text); font-size: 14px; resize: none; font-family: inherit; outline: none; }
   #prompt:focus { border-color: var(--accent); }
-  .btn-group { display: flex; gap: 8px; }
   #send { background: var(--accent); color: #0f172a; border: none; padding: 0 24px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px; }
   #send:disabled { opacity: 0.4; cursor: not-allowed; }
   #send:hover:not(:disabled) { filter: brightness(1.1); }
-  #download { background: transparent; color: var(--accent); border: 1px solid var(--accent); padding: 0 24px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px; }
-  #download:disabled { opacity: 0.4; cursor: not-allowed; }
-  #download:hover:not(:disabled) { background: rgba(56, 189, 248, 0.1); }
 </style>
 </head>
 <body>
@@ -59,11 +55,8 @@
 <div id="chat"></div>
 
 <div id="input-area">
-  <textarea id="prompt" rows="1" placeholder='Ask for a report (e.g. "Show me revenue by product for Q1")...' autofocus></textarea>
-  <div class="btn-group">
-    <button id="send">Send</button>
-    <button id="download" title="Download as CSV">Download</button>
-  </div>
+  <textarea id="prompt" rows="1" placeholder='Ask for a report (e.g. "Show me revenue by product for Q1" or "Download revenue report")...' autofocus></textarea>
+  <button id="send">Send</button>
 </div>
 
 <script>
@@ -73,7 +66,6 @@
   var chatEl = document.getElementById('chat');
   var promptEl = document.getElementById('prompt');
   var sendBtn = document.getElementById('send');
-  var downloadBtn = document.getElementById('download');
   var statusEl = document.getElementById('status');
 
   function escapeHtml(text) {
@@ -151,6 +143,36 @@
         });
       }
 
+      // Detect download intent from Content-Disposition header
+      var disposition = response.headers.get('Content-Disposition');
+      if (disposition && disposition.indexOf('attachment') !== -1) {
+        // Extract filename
+        var filename = 'report.csv';
+        var match = disposition.match(/filename="?([^"]+)"?/);
+        if (match) filename = match[1];
+
+        // Consume the full response as blob and trigger download
+        return response.blob().then(function(blob) {
+          ui.cursor.remove();
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          a.style.display = 'none';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+
+          var meta = createEl('div', 'meta', ui.msg);
+          meta.textContent = 'Downloaded: ' + filename + ' (' + (blob.size / 1024).toFixed(1) + ' KB)';
+          sendBtn.disabled = false;
+          promptEl.focus();
+          chatEl.scrollTop = chatEl.scrollHeight;
+        });
+      }
+
+      // Display mode: stream chunks into pre block
       var reader = response.body.getReader();
       var decoder = new TextDecoder();
 
@@ -212,67 +234,6 @@
     promptEl.style.height = Math.min(promptEl.scrollHeight, 120) + 'px';
   });
 
-  // Download: fetch response as blob and trigger browser download
-  function downloadPrompt() {
-    var text = promptEl.value.trim();
-    if (!text) return;
-
-    addUserMessage('Download: ' + text);
-    downloadBtn.disabled = true;
-
-    fetch('/ai/download', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: text })
-    }).then(function(response) {
-      if (!response.ok) {
-        return response.json().then(function(err) {
-          var ui = addBotMessage();
-          ui.pre.textContent = 'Error ' + response.status + ': ' + (err.message || err.error || response.statusText);
-          ui.cursor.remove();
-        }).catch(function() {
-          var ui = addBotMessage();
-          ui.pre.textContent = 'Error ' + response.status + ': ' + response.statusText;
-          ui.cursor.remove();
-        });
-      }
-
-      // Get filename from Content-Disposition header
-      var disposition = response.headers.get('Content-Disposition');
-      var filename = 'report.csv';
-      if (disposition) {
-        var match = disposition.match(/filename="?([^"]+)"?/);
-        if (match) filename = match[1];
-      }
-
-      return response.blob().then(function(blob) {
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.style.display = 'none';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        var ui = addBotMessage();
-        ui.pre.textContent = 'Downloaded: ' + filename;
-        ui.cursor.remove();
-        var meta = createEl('div', 'meta', ui.msg);
-        meta.textContent = (blob.size / 1024).toFixed(1) + ' KB';
-      });
-    }).catch(function(err) {
-      var ui = addBotMessage();
-      ui.pre.textContent = 'Download error: ' + err.message;
-      ui.cursor.remove();
-    }).finally(function() {
-      downloadBtn.disabled = false;
-      promptEl.focus();
-    });
-  }
-
-  downloadBtn.addEventListener('click', downloadPrompt);
 })();
 </script>
 

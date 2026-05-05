@@ -41,15 +41,10 @@ public class AiController {
 
     @PostMapping(value = "/request", produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<StreamingResponseBody> handleAiRequest(@Valid @RequestBody AiRequest request) {
-        return handleAiRequestInternal(request, false);
+        return handleAiRequestInternal(request);
     }
 
-    @PostMapping(value = "/download", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
-    public ResponseEntity<StreamingResponseBody> handleDownloadRequest(@Valid @RequestBody AiRequest request) {
-        return handleAiRequestInternal(request, true);
-    }
-
-    private ResponseEntity<StreamingResponseBody> handleAiRequestInternal(@Valid @RequestBody AiRequest request, boolean asDownload) {
+    private ResponseEntity<StreamingResponseBody> handleAiRequestInternal(@Valid @RequestBody AiRequest request) {
         String correlationId = UUID.randomUUID().toString();
         log.info("[{}] Received AI request: {}", correlationId, request.prompt());
 
@@ -65,10 +60,13 @@ public class AiController {
         StreamingResponseBody stream = mcpClient.executeToolCall(toolCall, correlationId);
 
         var builder = ResponseEntity.ok().header("X-Correlation-ID", correlationId);
-        if (asDownload) {
+
+        // Detect download intent from user prompt — if present, return as file attachment
+        if (request.prompt().toLowerCase().contains("download")) {
             String filename = toolCall.tool() + "-" + System.currentTimeMillis() + ".csv";
             builder.header("Content-Disposition", "attachment; filename=\"" + filename + "\"");
         }
+
         return builder.body(stream);
     }
 
