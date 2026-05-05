@@ -1,0 +1,36 @@
+services:
+  domain-api:
+    build: ./domain-api
+    ports:
+      - "8082:8082"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+
+  mcp-server:
+    build: ./mcp-server
+    ports:
+      - "8081:8081"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - DOMAIN_API_URL=http://domain-api:8082
+    depends_on:
+      - domain-api
+
+  ai-gateway:
+    build: ./report-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - LLM_PROVIDER=mock
+      - MCP_SERVER_URL=http://mcp-server:8081
+    depends_on:
+      - mcp-server
+
+  mock-llm:
+    image: alpine:3.20
+    command: >
+      sh -c 'echo "Mock LLM — use LLM_PROVIDER=mock to enable built-in mock" && sleep infinity'
+    profiles:
+      - mock
+    restart: unless-stopped

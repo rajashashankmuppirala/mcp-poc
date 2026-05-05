@@ -1,0 +1,18 @@
+server:
+  port: 8080
+
+llm:
+  provider: ${LLM_PROVIDER:azure-openai}
+  azure:
+    endpoint: ${AZURE_OPENAI_ENDPOINT:http://localhost:9999}
+    api-key: ${AZURE_OPENAI_API_KEY:test-key}
+    deployment: ${AZURE_OPENAI_DEPLOYMENT:gpt-4o-mini}
+    api-version: "2024-06-01"
+
+mcp-server:
+  url: ${MCP_SERVER_URL:http://localhost:8081}
+
+logging:
+  level:
+    com.example.gateway: INFO
+    com.example.gateway.service.McpClientService: DEBUG

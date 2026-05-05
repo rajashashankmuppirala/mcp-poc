@@ -1,0 +1,9 @@
+server:
+  port: 8082
+  tomcat:
+    threads:
+      max: 20
+
+logging:
+  level:
+    com.example.domain: INFO

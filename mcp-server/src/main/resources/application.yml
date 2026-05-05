@@ -1,0 +1,9 @@
+server:
+  port: 8081
+
+domain-api:
+  url: http://localhost:8082
+
+logging:
+  level:
+    com.example.mcp: INFO
