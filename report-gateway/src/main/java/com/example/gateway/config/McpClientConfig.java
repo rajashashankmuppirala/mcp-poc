@@ -18,6 +18,7 @@ public class McpClientConfig {
 
     @Bean(destroyMethod = "closeGracefully")
     public McpAsyncClient mcpAsyncClient() {
+        // serverUrl should include /sse path (e.g., http://localhost:8081/sse)
         var transport = HttpClientSseClientTransport.builder(serverUrl).build();
         return McpClient.async(transport)
                 .clientInfo(new McpSchema.Implementation("report-gateway-client", "1.0.0"))
