@@ -98,7 +98,8 @@ public class AzureOpenAiProvider implements LlmProvider {
                     return new ToolCall(toolName, params);
                 }
             }
-            throw new IllegalStateException("LLM returned natural language instead of tool call");
+            log.info("Azure OpenAI returned no tool call — prompt may not match any available tool");
+            return null;
         } catch (Exception e) {
             throw new IllegalStateException("Failed to parse Azure OpenAI response: " + e.getMessage(), e);
         }

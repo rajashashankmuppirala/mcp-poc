@@ -17,7 +17,8 @@ public interface LlmProvider {
      *
      * @param userMessage the validated natural language prompt
      * @param tools       the list of available tool definitions
-     * @return a ToolCall containing the selected tool name and its arguments
+     * @return a ToolCall containing the selected tool name and its arguments,
+     *         or null if the prompt does not match any available tool
      */
     ToolCall generateToolCall(String userMessage, List<ToolDefinition> tools);
 

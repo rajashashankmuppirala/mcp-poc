@@ -30,6 +30,7 @@ spring:
 # LLM Provider configuration
 llm:
   provider: ${LLM_PROVIDER:mock}
+  fallback-message: ${LLM_FALLBACK_MESSAGE:Sorry, I cannot help with this request.}
   azure:
     endpoint: ${AZURE_OPENAI_ENDPOINT:http://localhost:9999}
     api-key: ${AZURE_OPENAI_API_KEY:test-key}

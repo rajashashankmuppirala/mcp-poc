@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
@@ -21,6 +22,13 @@ import reactor.core.publisher.Mono;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+
+/**
+ * Thrown when the LLM determines the prompt does not match any available tool.
+ */
+class NoToolMatchException extends RuntimeException {
+    NoToolMatchException(String message) { super(message); }
+}
 
 @RestController
 @RequestMapping("/ai")
@@ -32,13 +40,16 @@ public class AiController {
     private final ToolCallValidator validator;
     private final McpClientService mcpClient;
     private final PromptInjectionDetector injectionDetector;
+    private final String fallbackMessage;
 
     public AiController(LlmProvider llmProvider, ToolCallValidator validator,
-                        McpClientService mcpClient, PromptInjectionDetector injectionDetector) {
+                        McpClientService mcpClient, PromptInjectionDetector injectionDetector,
+                        @Value("${llm.fallback-message:Sorry, I cannot help with this request.}") String fallbackMessage) {
         this.llmProvider = llmProvider;
         this.validator = validator;
         this.mcpClient = mcpClient;
         this.injectionDetector = injectionDetector;
+        this.fallbackMessage = fallbackMessage;
     }
 
     @PostMapping(value = "/request", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -64,6 +75,10 @@ public class AiController {
         // Step 1: Call LLM provider to convert prompt → tool call
         Mono<ToolCall> toolCallMono = Mono.fromCallable(() -> {
             ToolCall toolCall = llmProvider.generateToolCall(request.prompt(), tools);
+            if (toolCall == null) {
+                log.info("[{}] LLM ({}) returned null — prompt does not match any tool", correlationId, llmProvider.providerName());
+                throw new NoToolMatchException(fallbackMessage);
+            }
             log.info("[{}] LLM ({}) returned tool: {}", correlationId, llmProvider.providerName(), toolCall.tool());
             return toolCall;
         });
@@ -128,6 +143,11 @@ public class AiController {
     @ExceptionHandler(PromptInjectionDetector.PromptInjectionException.class)
     public Mono<ResponseEntity<Map<String, String>>> handlePromptInjection(PromptInjectionDetector.PromptInjectionException ex) {
         return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "PROMPT_INJECTION", "message", ex.getMessage())));
+    }
+
+    @ExceptionHandler(NoToolMatchException.class)
+    public Mono<ResponseEntity<Map<String, String>>> handleNoToolMatch(NoToolMatchException ex) {
+        return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "NO_TOOL_MATCH", "message", ex.getMessage())));
     }
 
     @ExceptionHandler(IllegalStateException.class)

@@ -31,9 +31,10 @@ class StreamingIntegrationTest {
     private final ToolCallValidator validator = mock(ToolCallValidator.class);
     private final McpClientService mcpClient = mock(McpClientService.class);
     private final PromptInjectionDetector injectionDetector = mock(PromptInjectionDetector.class);
+    private final String fallbackMessage = "Sorry, I cannot help with this request.";
 
     private final WebTestClient webTestClient = WebTestClient
-            .bindToController(new AiController(llmProvider, validator, mcpClient, injectionDetector))
+            .bindToController(new AiController(llmProvider, validator, mcpClient, injectionDetector, fallbackMessage))
             .build();
 
     private final ObjectMapper mapper = new ObjectMapper();

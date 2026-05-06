@@ -28,9 +28,10 @@ class AiControllerTest {
     private final ToolCallValidator validator = mock(ToolCallValidator.class);
     private final McpClientService mcpClient = mock(McpClientService.class);
     private final PromptInjectionDetector injectionDetector = mock(PromptInjectionDetector.class);
+    private final String fallbackMessage = "Sorry, I cannot help with this request.";
 
     private final WebTestClient webTestClient = WebTestClient
-            .bindToController(new AiController(llmProvider, validator, mcpClient, injectionDetector))
+            .bindToController(new AiController(llmProvider, validator, mcpClient, injectionDetector, fallbackMessage))
             .build();
 
     @BeforeEach
@@ -118,6 +119,22 @@ class AiControllerTest {
                 .expectStatus().isBadRequest()
                 .expectBody()
                 .jsonPath("$.error").isEqualTo("LLM_ERROR");
+    }
+
+    @Test
+    void handleAiRequest_shouldReturnFallbackWhenLlmReturnsNull() {
+        when(llmProvider.generateToolCall(anyString(), any())).thenReturn(null);
+        when(llmProvider.providerName()).thenReturn("mock");
+
+        webTestClient.post()
+                .uri("/ai/request")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"prompt\": \"What is the weather today?\"}")
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody()
+                .jsonPath("$.error").isEqualTo("NO_TOOL_MATCH")
+                .jsonPath("$.message").isEqualTo("Sorry, I cannot help with this request.");
     }
 
     @Test
