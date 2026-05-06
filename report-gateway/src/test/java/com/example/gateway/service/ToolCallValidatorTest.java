@@ -3,7 +3,10 @@ package com.example.gateway.service;
 import com.example.gateway.model.ToolCall;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -11,6 +14,11 @@ class ToolCallValidatorTest {
 
     private final ToolCallValidator validator = new ToolCallValidator();
     private final ObjectMapper mapper = new ObjectMapper();
+
+    @BeforeEach
+    void setUp() {
+        validator.updateAllowedTools(Set.of("generate_report"));
+    }
 
     @Test
     void shouldAcceptValidGenerateReportCall() {
@@ -84,5 +92,15 @@ class ToolCallValidatorTest {
 
         Exception ex = assertThrows(IllegalArgumentException.class, () -> validator.validate(toolCall));
         assertTrue(ex.getMessage().contains("Invalid tool parameters"));
+    }
+
+    @Test
+    void shouldRejectWhenAllowlistIsEmpty() {
+        validator.updateAllowedTools(Set.of());
+        ObjectNode params = mapper.createObjectNode();
+        ToolCall toolCall = new ToolCall("generate_report", params);
+
+        Exception ex = assertThrows(IllegalStateException.class, () -> validator.validate(toolCall));
+        assertTrue(ex.getMessage().contains("No tools registered"));
     }
 }

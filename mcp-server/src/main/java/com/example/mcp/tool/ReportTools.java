@@ -30,11 +30,13 @@ public class ReportTools {
             @McpToolParam(description = "Type of report (e.g., revenue, sales, inventory)", required = true) String reportType,
             @McpToolParam(description = "Start date in YYYY-MM-DD format", required = false) String startDate,
             @McpToolParam(description = "End date in YYYY-MM-DD format", required = false) String endDate,
-            @McpToolParam(description = "Region filter (e.g., us-east, eu-west)", required = false) String region
+            @McpToolParam(description = "Region filter (e.g., us-east, eu-west)", required = false) String region,
+            @McpToolParam(description = "User OAuth token for domain API auth", required = false) String _userToken
     ) {
         String correlationId = java.util.UUID.randomUUID().toString();
-        log.info("[{}] MCP tool invoked: generate_report(reportType={}, startDate={}, endDate={}, region={})",
-                correlationId, reportType, startDate, endDate, region);
+        log.info("[{}] MCP tool invoked: generate_report(reportType={}, startDate={}, endDate={}, region={}, token={})",
+                correlationId, reportType, startDate, endDate, region,
+                _userToken != null ? "present" : "none");
 
         String sanitizedType = sanitize(reportType, "revenue");
 
@@ -50,7 +52,8 @@ public class ReportTools {
             domainRequest.put("filters", Map.of("region", sanitize(region, null)));
         }
 
-        return reportStreamService.streamReport(domainRequest, correlationId).collectList().block();
+        return reportStreamService.streamReport(domainRequest, correlationId, _userToken)
+                .collectList().block();
     }
 
     private String sanitize(String input, String defaultVal) {

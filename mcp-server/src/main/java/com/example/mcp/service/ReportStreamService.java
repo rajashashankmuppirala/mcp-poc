@@ -13,6 +13,7 @@ import java.util.Map;
 /**
  * Reactive service that calls Domain API and streams response.
  * Uses WebClient for non-blocking streaming.
+ * Supports both user OAuth token passthrough and client credentials fallback.
  */
 @Service
 public class ReportStreamService {
@@ -20,9 +21,12 @@ public class ReportStreamService {
     private static final Logger log = LoggerFactory.getLogger(ReportStreamService.class);
 
     private final WebClient webClient;
+    private final String domainApiDefaultToken;
 
     public ReportStreamService(
-            @Value("${domain-api.url:http://localhost:8082}") String domainApiUrl) {
+            @Value("${domain-api.url:http://localhost:8082}") String domainApiUrl,
+            @Value("${domain-api.auth-token:dummy-oauth-token-for-poc}") String domainApiDefaultToken) {
+        this.domainApiDefaultToken = domainApiDefaultToken;
         this.webClient = WebClient.builder()
                 .baseUrl(domainApiUrl)
                 .build();
@@ -30,10 +34,20 @@ public class ReportStreamService {
 
     /**
      * Stream report from Domain API.
-     * Returns Flux<String> for reactive streaming to MCP client.
+     * @param request domain API request body
+     * @param correlationId trace ID for logging
+     * @param userToken optional user OAuth token — if absent, falls back to client credentials
+     * @return Flux of text chunks from the streaming response
      */
-    public Flux<String> streamReport(Map<String, Object> request, String correlationId) {
-        log.info("[{}] Streaming report: type={}", correlationId, request.get("reportType"));
+    public Flux<String> streamReport(Map<String, Object> request, String correlationId, String userToken) {
+        log.info("[{}] Streaming report: type={}, auth={}",
+                correlationId, request.get("reportType"),
+                userToken != null ? "user-token" : "client-credentials");
+
+        // Use user token if provided, otherwise fall back to configured client credentials
+        String authToken = (userToken != null && !userToken.isBlank())
+                ? userToken
+                : domainApiDefaultToken;
 
         long startTime = System.currentTimeMillis();
         int[] chunkCount = {0};
@@ -41,6 +55,7 @@ public class ReportStreamService {
         return webClient.post()
                 .uri("/api/v1/reports/stream")
                 .header("X-Correlation-ID", correlationId)
+                .header("Authorization", "Bearer " + authToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(request)
                 .retrieve()

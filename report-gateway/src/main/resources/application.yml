@@ -14,19 +14,18 @@ spring:
           filters:
             - RewritePath=/, /index.html
 
-  # Spring AI MCP Client — connects to MCP Server via SSE
-  # Note: MCP Server exposes SSE endpoint at /sse (Spring AI default)
+  # Spring AI MCP Client — Streamable HTTP transport to MCP Server
   ai:
     mcp:
       client:
         name: "report-gateway-client"
         version: "1.0.0"
         request-timeout: 60s
-        protocol: sse
-        sse:
+        protocol: streamable
+        streamable:
           connections:
             mcp-server:
-              url: ${MCP_SERVER_URL:http://localhost:8081/sse}
+              url: ${MCP_SERVER_URL:http://localhost:8081}
 
 # LLM Provider configuration
 llm:

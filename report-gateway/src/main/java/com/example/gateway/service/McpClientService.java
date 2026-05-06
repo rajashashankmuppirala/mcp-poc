@@ -1,6 +1,7 @@
 package com.example.gateway.service;
 
 import com.example.gateway.model.ToolCall;
+import com.example.gateway.model.ToolDefinition;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.client.McpAsyncClient;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -24,21 +25,62 @@ public class McpClientService {
 
     private final McpAsyncClient mcpClient;
     private final ObjectMapper mapper = new ObjectMapper();
+    private volatile List<ToolDefinition> discoveredTools;
 
     public McpClientService(McpAsyncClient mcpClient) {
         this.mcpClient = mcpClient;
     }
 
     /**
+     * Discover tools from the MCP server and cache them.
+     * Called at startup to populate the tool list dynamically.
+     */
+    public Mono<List<ToolDefinition>> discoverAndCacheTools() {
+        return listMcpTools()
+                .doOnNext(tools -> {
+                    this.discoveredTools = tools;
+                    log.info("Discovered {} tools from MCP server: {}", tools.size(),
+                            tools.stream().map(ToolDefinition::name).toList());
+                })
+                .doOnError(e -> log.warn("Failed to discover tools from MCP server: {}", e.getMessage()));
+    }
+
+    /**
+     * Returns the cached discovered tools, or an empty list if not yet discovered.
+     */
+    public List<ToolDefinition> getDiscoveredTools() {
+        return discoveredTools != null ? discoveredTools : List.of();
+    }
+
+    private Mono<List<ToolDefinition>> listMcpTools() {
+        return mcpClient.listTools()
+                .map(McpSchema.ListToolsResult::tools)
+                .map(mcpTools -> mcpTools.stream()
+                        .map(tool -> new ToolDefinition(
+                                tool.name(),
+                                tool.description(),
+                                mapper.valueToTree(tool.inputSchema())))
+                        .toList());
+    }
+
+    /**
      * Execute a tool call via MCP protocol (tools/call).
      * Returns a Flux of text lines for streaming.
+     * @param userToken optional user OAuth token to forward to MCP server
      */
     @SuppressWarnings("unchecked")
-    public Flux<String> executeToolCall(ToolCall toolCall, String correlationId) {
-        log.info("[{}] Executing MCP tool: {}", correlationId, toolCall.tool());
+    public Flux<String> executeToolCall(ToolCall toolCall, String correlationId, String userToken) {
+        log.info("[{}] Executing MCP tool: {}{}", correlationId, toolCall.tool(),
+                userToken != null ? " (user token present)" : "");
 
         long startTime = System.currentTimeMillis();
         Map<String, Object> args = mapper.convertValue(toolCall.parameters(), Map.class);
+
+        // Inject user token into tool arguments for downstream forwarding
+        if (userToken != null && !userToken.isBlank()) {
+            args = new java.util.HashMap<>(args);
+            args.put("_userToken", userToken);
+        }
 
         return mcpClient.callTool(new McpSchema.CallToolRequest(toolCall.tool(), args))
                 .doOnNext(result -> {

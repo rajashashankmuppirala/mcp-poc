@@ -5,19 +5,19 @@ import com.example.gateway.model.ToolCall;
 import com.example.gateway.model.ToolDefinition;
 import com.example.gateway.service.LlmProvider;
 import com.example.gateway.service.McpClientService;
+import com.example.gateway.service.PromptInjectionDetector;
 import com.example.gateway.service.ToolCallValidator;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -31,26 +31,39 @@ public class AiController {
     private final LlmProvider llmProvider;
     private final ToolCallValidator validator;
     private final McpClientService mcpClient;
-    private final List<ToolDefinition> toolDefinitions;
-    private final ObjectMapper mapper = new ObjectMapper();
+    private final PromptInjectionDetector injectionDetector;
 
-    public AiController(LlmProvider llmProvider, ToolCallValidator validator, McpClientService mcpClient) {
+    public AiController(LlmProvider llmProvider, ToolCallValidator validator,
+                        McpClientService mcpClient, PromptInjectionDetector injectionDetector) {
         this.llmProvider = llmProvider;
         this.validator = validator;
         this.mcpClient = mcpClient;
-        this.toolDefinitions = buildToolDefinitions();
+        this.injectionDetector = injectionDetector;
     }
 
     @PostMapping(value = "/request", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<String> handleAiRequest(@RequestBody AiRequest request) {
+    public Flux<String> handleAiRequest(@RequestBody AiRequest request, ServerWebExchange exchange) {
         String correlationId = UUID.randomUUID().toString();
         log.info("[{}] Received AI request: {}", correlationId, request.prompt());
+
+        // Layer 1: Prompt injection check
+        injectionDetector.check(request.prompt());
+
+        // Resolve tools dynamically from MCP server (discovered at startup)
+        List<ToolDefinition> tools = mcpClient.getDiscoveredTools();
+        if (tools.isEmpty()) {
+            log.warn("[{}] No tools discovered from MCP server", correlationId);
+            return Flux.error(new IllegalStateException("No tools available from MCP server"));
+        }
+
+        // Extract auth token from request header for downstream propagation
+        String userToken = exchange.getRequest().getHeaders().getFirst("X-User-Token");
 
         boolean isDownload = request.prompt().toLowerCase().contains("download");
 
         // Step 1: Call LLM provider to convert prompt → tool call
         Mono<ToolCall> toolCallMono = Mono.fromCallable(() -> {
-            ToolCall toolCall = llmProvider.generateToolCall(request.prompt(), toolDefinitions);
+            ToolCall toolCall = llmProvider.generateToolCall(request.prompt(), tools);
             log.info("[{}] LLM ({}) returned tool: {}", correlationId, llmProvider.providerName(), toolCall.tool());
             return toolCall;
         });
@@ -63,9 +76,9 @@ public class AiController {
 
         // Step 3: Execute via MCP client, parse JSON array, emit rows as SSE
         Flux<String> rowStream = toolCallMono
-                .flatMapMany(tc -> mcpClient.executeToolCall(tc, correlationId))
+                .flatMapMany(tc -> mcpClient.executeToolCall(tc, correlationId, userToken))
                 .flatMap(jsonArray -> {
-                    // MCP server returns JSON array like ["row1\n","row2\n",...]
+                    ObjectMapper mapper = new ObjectMapper();
                     try {
                         List<String> rows = mapper.readValue(jsonArray,
                                 mapper.getTypeFactory().constructCollectionType(List.class, String.class));
@@ -90,6 +103,18 @@ public class AiController {
         return Map.of("status", "ok", "name", "report-gateway");
     }
 
+    @GetMapping("/tools")
+    public Map<String, Object> listTools() {
+        List<ToolDefinition> tools = mcpClient.getDiscoveredTools();
+        return Map.of(
+                "tools", tools.stream().map(t -> Map.of(
+                        "name", t.name(),
+                        "description", t.description()
+                )).toList(),
+                "count", tools.size()
+        );
+    }
+
     @ExceptionHandler(org.springframework.web.bind.MethodArgumentNotValidException.class)
     public Mono<ResponseEntity<Map<String, String>>> handleValidation(org.springframework.web.bind.MethodArgumentNotValidException ex) {
         return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "VALIDATION_FAILED", "message", ex.getMessage())));
@@ -98,6 +123,11 @@ public class AiController {
     @ExceptionHandler(IllegalArgumentException.class)
     public Mono<ResponseEntity<Map<String, String>>> handleBadToolCall(IllegalArgumentException ex) {
         return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "INVALID_TOOL_CALL", "message", ex.getMessage())));
+    }
+
+    @ExceptionHandler(PromptInjectionDetector.PromptInjectionException.class)
+    public Mono<ResponseEntity<Map<String, String>>> handlePromptInjection(PromptInjectionDetector.PromptInjectionException ex) {
+        return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "PROMPT_INJECTION", "message", ex.getMessage())));
     }
 
     @ExceptionHandler(IllegalStateException.class)
@@ -109,41 +139,5 @@ public class AiController {
     public Mono<ResponseEntity<Map<String, String>>> handleGeneral(Exception ex) {
         log.error("Unexpected error", ex);
         return Mono.just(ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "INTERNAL_ERROR", "message", "An unexpected error occurred")));
-    }
-
-    private List<ToolDefinition> buildToolDefinitions() {
-        ObjectMapper mapper = new ObjectMapper();
-        ObjectNode params = mapper.createObjectNode();
-        params.put("type", "object");
-        ObjectNode properties = mapper.createObjectNode();
-
-        ObjectNode reportType = mapper.createObjectNode();
-        reportType.put("type", "string");
-        reportType.put("description", "Type of report (e.g., revenue, sales, inventory)");
-        properties.set("reportType", reportType);
-
-        ObjectNode startDate = mapper.createObjectNode();
-        startDate.put("type", "string");
-        startDate.put("description", "Start date in YYYY-MM-DD format");
-        properties.set("startDate", startDate);
-
-        ObjectNode endDate = mapper.createObjectNode();
-        endDate.put("type", "string");
-        endDate.put("description", "End date in YYYY-MM-DD format");
-        properties.set("endDate", endDate);
-
-        ObjectNode region = mapper.createObjectNode();
-        region.put("type", "string");
-        region.put("description", "Region filter (e.g., us-east, eu-west)");
-        properties.set("region", region);
-
-        params.set("properties", properties);
-        params.set("required", mapper.createArrayNode());
-
-        return List.of(new ToolDefinition(
-                "generate_report",
-                "Generate a structured report from domain data",
-                params
-        ));
     }
 }

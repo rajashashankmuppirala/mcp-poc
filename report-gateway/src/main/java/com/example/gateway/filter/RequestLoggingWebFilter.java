@@ -20,7 +20,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * WebFlux filter for correlation ID generation, request logging, and rate limiting.
- * Replaces the servlet-based RequestLoggingFilter.
  */
 @Component
 public class RequestLoggingWebFilter implements WebFilter, Ordered {

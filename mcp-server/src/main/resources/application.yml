@@ -1,17 +1,20 @@
 server:
   port: 8081
 
-# Spring AI MCP Server (SSE protocol via WebMVC starter)
+# Spring AI MCP Server (Streamable HTTP protocol via WebMVC starter)
 spring:
   ai:
     mcp:
       server:
-        protocol: SSE
+        protocol: STREAMABLE
         name: "report-generator-mcp-server"
         version: "1.0.0"
+        streamable-http:
+          mcp-endpoint: /mcp
 
 domain-api:
   url: ${DOMAIN_API_URL:http://localhost:8082}
+  auth-token: ${DOMAIN_API_TOKEN:dummy-oauth-token-for-poc}
 
 logging:
   level:

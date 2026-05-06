@@ -22,10 +22,10 @@ class ReportToolsTest {
 
     @Test
     void generateReport_shouldStreamData() {
-        when(reportStreamService.streamReport(any(), anyString()))
+        when(reportStreamService.streamReport(any(), anyString(), any()))
                 .thenReturn(Flux.just("row1,data", "row2,data"));
 
-        var result = reportTools.generate_report("revenue", null, null, null);
+        var result = reportTools.generate_report("revenue", null, null, null, null);
 
         assert result != null;
         assert result.size() == 2;

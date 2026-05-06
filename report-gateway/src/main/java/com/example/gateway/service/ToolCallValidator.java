@@ -7,16 +7,21 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 @Service
 public class ToolCallValidator {
 
     private static final Logger log = LoggerFactory.getLogger(ToolCallValidator.class);
-    private static final Set<String> ALLOWED_TOOLS = Set.of("generate_report");
+
+    // Dynamically populated from MCP server tool discovery
+    private final Set<String> allowedTools = ConcurrentHashMap.newKeySet();
 
     private static final Map<String, Pattern> PARAM_PATTERNS = Map.of(
             "reportType", Pattern.compile("^[a-zA-Z_]+$"),
@@ -25,13 +30,25 @@ public class ToolCallValidator {
             "region", Pattern.compile("^[a-z]+-[a-z]+$")
     );
 
+    /**
+     * Update the allowed tool allowlist from discovered MCP tools.
+     */
+    public void updateAllowedTools(Set<String> toolNames) {
+        allowedTools.clear();
+        allowedTools.addAll(toolNames);
+        log.info("ToolCallValidator allowlist updated to: {}", allowedTools);
+    }
+
     public void validate(ToolCall toolCall) {
         if (toolCall.tool() == null || toolCall.tool().isBlank()) {
             throw new IllegalArgumentException("Tool name is empty");
         }
-        if (!ALLOWED_TOOLS.contains(toolCall.tool())) {
+        if (allowedTools.isEmpty()) {
+            throw new IllegalStateException("No tools registered in allowlist");
+        }
+        if (!allowedTools.contains(toolCall.tool())) {
             throw new IllegalArgumentException("Unknown tool: " + toolCall.tool()
-                    + ". Available: " + String.join(", ", ALLOWED_TOOLS));
+                    + ". Available: " + String.join(", ", allowedTools));
         }
         if (toolCall.parameters() == null) {
             throw new IllegalArgumentException("Tool parameters are null");

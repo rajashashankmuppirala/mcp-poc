@@ -2,7 +2,7 @@ package com.example.gateway.config;
 
 import io.modelcontextprotocol.client.McpAsyncClient;
 import io.modelcontextprotocol.client.McpClient;
-import io.modelcontextprotocol.client.transport.HttpClientSseClientTransport;
+import io.modelcontextprotocol.client.transport.HttpClientStreamableHttpTransport;
 import io.modelcontextprotocol.spec.McpSchema;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -18,8 +18,8 @@ public class McpClientConfig {
 
     @Bean(destroyMethod = "closeGracefully")
     public McpAsyncClient mcpAsyncClient() {
-        // serverUrl should include /sse path (e.g., http://localhost:8081/sse)
-        var transport = HttpClientSseClientTransport.builder(serverUrl).build();
+        // Streamable HTTP transport — single endpoint, stateless, simpler than SSE
+        var transport = HttpClientStreamableHttpTransport.builder(serverUrl).build();
         return McpClient.async(transport)
                 .clientInfo(new McpSchema.Implementation("report-gateway-client", "1.0.0"))
                 .requestTimeout(Duration.ofSeconds(60))

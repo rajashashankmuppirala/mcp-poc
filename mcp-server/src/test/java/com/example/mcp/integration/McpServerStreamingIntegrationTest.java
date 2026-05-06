@@ -13,6 +13,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.when;
 
 @SpringBootTest
@@ -26,14 +27,15 @@ class McpServerStreamingIntegrationTest {
 
     @Test
     void shouldStreamReportFromDomainApi() {
-        when(reportStreamService.streamReport(any(), anyString()))
+        when(reportStreamService.streamReport(any(), anyString(), any()))
                 .thenReturn(Flux.just(
                         "row1,Product A,100,10.00,1000.00",
                         "row2,Product B,200,20.00,4000.00",
                         "row3,Product C,150,15.00,2250.00"
                 ));
 
-        java.util.List<String> result = reportTools.generate_report("revenue", "2026-01-01", "2026-03-31", "us-east");
+        java.util.List<String> result = reportTools.generate_report(
+                "revenue", "2026-01-01", "2026-03-31", "us-east", null);
 
         assertEquals(3, result.size());
         assertEquals("row1,Product A,100,10.00,1000.00", result.get(0));
@@ -43,10 +45,10 @@ class McpServerStreamingIntegrationTest {
 
     @Test
     void shouldHandleMissingOptionalParams() {
-        when(reportStreamService.streamReport(any(), anyString()))
+        when(reportStreamService.streamReport(any(), anyString(), any()))
                 .thenReturn(Flux.just("row1,data"));
 
-        java.util.List<String> result = reportTools.generate_report("sales", null, null, null);
+        java.util.List<String> result = reportTools.generate_report("sales", null, null, null, null);
 
         assertEquals(1, result.size());
         assertEquals("row1,data", result.get(0));
