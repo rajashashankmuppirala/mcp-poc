@@ -68,12 +68,6 @@
   var sendBtn = document.getElementById('send');
   var statusEl = document.getElementById('status');
 
-  function escapeHtml(text) {
-    var el = document.createElement('span');
-    el.textContent = text;
-    return el.innerHTML;
-  }
-
   function createEl(tag, className, parent) {
     var el = document.createElement(tag);
     el.className = className;
@@ -83,15 +77,17 @@
 
   // Check connectivity
   function checkStatus() {
-    fetch('/ai/request', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: 'health' }),
+    fetch('/ai/status', {
       signal: AbortSignal.timeout(3000)
     }).then(function(r) {
-      // Any response (even 400) means server is up
-      statusEl.textContent = 'Connected';
-      statusEl.className = 'connected';
+      return r.json();
+    }).then(function(data) {
+      if (data.status === 'ok') {
+        statusEl.textContent = 'Connected';
+        statusEl.className = 'connected';
+      } else {
+        throw new Error('not ok');
+      }
     }).catch(function() {
       statusEl.textContent = 'Disconnected';
       statusEl.className = 'disconnected';
@@ -116,6 +112,18 @@
     return { pre: pre, cursor: cursor, msg: msg };
   }
 
+  // Parse SSE event: extract data from "data: <payload>\n" lines
+  function parseSSE(rawText) {
+    var lines = rawText.split('\n');
+    var dataLines = [];
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf('data: ') === 0) {
+        dataLines.push(lines[i].substring(6));
+      }
+    }
+    return dataLines;
+  }
+
   function sendPrompt() {
     var text = promptEl.value.trim();
     if (!text) return;
@@ -124,6 +132,17 @@
     sendBtn.disabled = true;
     addUserMessage(text);
 
+    var isDownload = text.toLowerCase().indexOf('download') !== -1;
+
+    if (isDownload) {
+      sendAsDownload(text);
+    } else {
+      sendAsStream(text);
+    }
+  }
+
+  // Display mode: parse SSE events and render progressively
+  function sendAsStream(text) {
     var ui = addBotMessage();
     var rowCount = 0;
     var buffer = '';
@@ -143,49 +162,18 @@
         });
       }
 
-      // Detect download intent from Content-Disposition header
-      var disposition = response.headers.get('Content-Disposition');
-      if (disposition && disposition.indexOf('attachment') !== -1) {
-        // Extract filename
-        var filename = 'report.csv';
-        var match = disposition.match(/filename="?([^"]+)"?/);
-        if (match) filename = match[1];
-
-        // Consume the full response as blob and trigger download
-        return response.blob().then(function(blob) {
-          ui.cursor.remove();
-          var url = URL.createObjectURL(blob);
-          var a = document.createElement('a');
-          a.href = url;
-          a.download = filename;
-          a.style.display = 'none';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-
-          var meta = createEl('div', 'meta', ui.msg);
-          meta.textContent = 'Downloaded: ' + filename + ' (' + (blob.size / 1024).toFixed(1) + ' KB)';
-          sendBtn.disabled = false;
-          promptEl.focus();
-          chatEl.scrollTop = chatEl.scrollHeight;
-        });
-      }
-
-      // Display mode: stream chunks into pre block
       var reader = response.body.getReader();
       var decoder = new TextDecoder();
 
       function read() {
         return reader.read().then(function(result) {
           if (result.done) {
-            if (buffer.trim()) {
-              rowCount++;
-              ui.pre.textContent += buffer + '\n';
+            // Process remaining buffer
+            var events = parseSSE(buffer);
+            for (var j = 0; j < events.length; j++) {
+              if (events[j].trim()) { rowCount++; ui.pre.textContent += events[j] + '\n'; }
             }
-            if (rowCount === 0) {
-              ui.pre.textContent = '(No data returned)';
-            }
+            if (rowCount === 0) ui.pre.textContent = '(No data returned)';
             var meta = createEl('div', 'meta', ui.msg);
             meta.textContent = rowCount + ' rows received';
             ui.cursor.remove();
@@ -197,13 +185,18 @@
 
           var chunk = decoder.decode(result.value, { stream: true });
           buffer += chunk;
-          var lines = buffer.split('\n');
-          buffer = lines.pop() || '';
 
-          for (var i = 0; i < lines.length; i++) {
-            if (lines[i].trim()) {
-              rowCount++;
-              ui.pre.textContent += lines[i] + '\n';
+          // Extract complete SSE events (delimited by blank line or "data:" after previous data)
+          var parts = buffer.split('\n\n');
+          buffer = parts.pop() || '';
+
+          for (var i = 0; i < parts.length; i++) {
+            var events = parseSSE(parts[i]);
+            for (var j = 0; j < events.length; j++) {
+              if (events[j].trim()) {
+                rowCount++;
+                ui.pre.textContent += events[j] + '\n';
+              }
             }
           }
           chatEl.scrollTop = chatEl.scrollHeight;
@@ -220,6 +213,64 @@
     });
   }
 
+  // Download mode: consume full SSE, strip data: prefix, trigger file download
+  function sendAsDownload(text) {
+    addUserMessage('Downloading report...');
+    var ui = addBotMessage();
+
+    fetch('/ai/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: text })
+    }).then(function(response) {
+      if (!response.ok) {
+        return response.json().then(function(err) {
+          ui.pre.textContent = 'Error ' + response.status + ': ' + (err.message || err.error || response.statusText);
+          ui.cursor.remove();
+        }).catch(function() {
+          ui.pre.textContent = 'Error ' + response.status + ': ' + response.statusText;
+          ui.cursor.remove();
+        });
+      }
+
+      return response.text().then(function(rawText) {
+        // Parse SSE events, strip data: prefix, join into CSV
+        var events = parseSSE(rawText);
+        // First event might be filename metadata
+        var filename = 'report.csv';
+        var dataStart = 0;
+        if (events.length > 0 && events[0].indexOf('.') !== -1 && events[0].indexOf(',') === -1) {
+          filename = events[0];
+          dataStart = 1;
+        }
+
+        var content = events.slice(dataStart).join('\n');
+        var blob = new Blob([content], { type: 'text/csv' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        ui.cursor.remove();
+        var meta = createEl('div', 'meta', ui.msg);
+        meta.textContent = 'Downloaded: ' + filename + ' (' + (blob.size / 1024).toFixed(1) + ' KB)';
+        sendBtn.disabled = false;
+        promptEl.focus();
+        chatEl.scrollTop = chatEl.scrollHeight;
+      });
+    }).catch(function(err) {
+      ui.pre.textContent = 'Download error: ' + err.message;
+      ui.cursor.remove();
+      sendBtn.disabled = false;
+      promptEl.focus();
+    });
+  }
+
   sendBtn.addEventListener('click', sendPrompt);
   promptEl.addEventListener('keydown', function(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -228,7 +279,6 @@
     }
   });
 
-  // Auto-resize textarea
   promptEl.addEventListener('input', function() {
     promptEl.style.height = 'auto';
     promptEl.style.height = Math.min(promptEl.scrollHeight, 120) + 'px';

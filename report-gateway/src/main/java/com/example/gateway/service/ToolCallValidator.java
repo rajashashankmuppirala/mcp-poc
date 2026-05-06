@@ -1,17 +1,16 @@
 package com.example.gateway.service;
 
 import com.example.gateway.model.ToolCall;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.networknt.schema.JsonSchema;
-import com.networknt.schema.JsonSchemaFactory;
-import com.networknt.schema.SpecVersion;
-import com.networknt.schema.ValidationMessage;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 @Service
 public class ToolCallValidator {
@@ -19,39 +18,12 @@ public class ToolCallValidator {
     private static final Logger log = LoggerFactory.getLogger(ToolCallValidator.class);
     private static final Set<String> ALLOWED_TOOLS = Set.of("generate_report");
 
-    private final JsonSchema schema;
-
-    public ToolCallValidator() {
-        ObjectMapper mapper = new ObjectMapper();
-        ObjectNode params = mapper.createObjectNode();
-        params.put("type", "object");
-        ObjectNode properties = mapper.createObjectNode();
-
-        ObjectNode reportType = mapper.createObjectNode();
-        reportType.put("type", "string");
-        reportType.put("pattern", "^[a-zA-Z_]+$");
-        properties.set("reportType", reportType);
-
-        ObjectNode startDate = mapper.createObjectNode();
-        startDate.put("type", "string");
-        startDate.put("pattern", "^\\d{4}-\\d{2}-\\d{2}$");
-        properties.set("startDate", startDate);
-
-        ObjectNode endDate = mapper.createObjectNode();
-        endDate.put("type", "string");
-        endDate.put("pattern", "^\\d{4}-\\d{2}-\\d{2}$");
-        properties.set("endDate", endDate);
-
-        ObjectNode region = mapper.createObjectNode();
-        region.put("type", "string");
-        region.put("pattern", "^[a-z]+-[a-z]+$");
-        properties.set("region", region);
-
-        params.set("properties", properties);
-
-        JsonSchemaFactory factory = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012);
-        this.schema = factory.getSchema(params);
-    }
+    private static final Map<String, Pattern> PARAM_PATTERNS = Map.of(
+            "reportType", Pattern.compile("^[a-zA-Z_]+$"),
+            "startDate", Pattern.compile("^\\d{4}-\\d{2}-\\d{2}$"),
+            "endDate", Pattern.compile("^\\d{4}-\\d{2}-\\d{2}$"),
+            "region", Pattern.compile("^[a-z]+-[a-z]+$")
+    );
 
     public void validate(ToolCall toolCall) {
         if (toolCall.tool() == null || toolCall.tool().isBlank()) {
@@ -65,9 +37,20 @@ public class ToolCallValidator {
             throw new IllegalArgumentException("Tool parameters are null");
         }
 
-        Set<ValidationMessage> errors = schema.validate(toolCall.parameters());
+        JsonNode params = toolCall.parameters();
+        List<String> errors = new ArrayList<>();
+        for (Map.Entry<String, Pattern> entry : PARAM_PATTERNS.entrySet()) {
+            JsonNode value = params.get(entry.getKey());
+            if (value != null && !value.isNull()) {
+                String str = value.asText();
+                if (!entry.getValue().matcher(str).matches()) {
+                    errors.add("$.%s: does not match the required pattern".formatted(entry.getKey()));
+                }
+            }
+        }
+
         if (!errors.isEmpty()) {
-            String msg = errors.stream().map(ValidationMessage::getMessage).reduce((a, b) -> a + "; " + b).orElse("");
+            String msg = String.join("; ", errors);
             log.warn("Tool call validation failed: {}", msg);
             throw new IllegalArgumentException("Invalid tool parameters: " + msg);
         }

@@ -1,9 +1,19 @@
 server:
   port: 8081
 
+# Spring AI MCP Server (SSE protocol via WebMVC starter)
+spring:
+  ai:
+    mcp:
+      server:
+        protocol: SSE
+        name: "report-generator-mcp-server"
+        version: "1.0.0"
+
 domain-api:
-  url: http://localhost:8082
+  url: ${DOMAIN_API_URL:http://localhost:8082}
 
 logging:
   level:
-    com.example.mcp: INFO
+    com.example.mcp: DEBUG
+    org.springframework.ai: DEBUG

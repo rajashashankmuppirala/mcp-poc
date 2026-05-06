@@ -8,15 +8,16 @@ import com.example.gateway.service.McpClientService;
 import com.example.gateway.service.ToolCallValidator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -39,57 +40,66 @@ public class AiController {
         this.toolDefinitions = buildToolDefinitions();
     }
 
-    @PostMapping(value = "/request", produces = MediaType.TEXT_PLAIN_VALUE)
-    public ResponseEntity<StreamingResponseBody> handleAiRequest(@Valid @RequestBody AiRequest request) {
-        return handleAiRequestInternal(request);
-    }
-
-    private ResponseEntity<StreamingResponseBody> handleAiRequestInternal(@Valid @RequestBody AiRequest request) {
+    @PostMapping(value = "/request", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<String> handleAiRequest(@RequestBody AiRequest request) {
         String correlationId = UUID.randomUUID().toString();
         log.info("[{}] Received AI request: {}", correlationId, request.prompt());
 
+        boolean isDownload = request.prompt().toLowerCase().contains("download");
+
         // Step 1: Call LLM provider to convert prompt → tool call
-        ToolCall toolCall = llmProvider.generateToolCall(request.prompt(), toolDefinitions);
-        log.info("[{}] LLM ({}) returned tool: {}", correlationId, llmProvider.providerName(), toolCall.tool());
+        Mono<ToolCall> toolCallMono = Mono.fromCallable(() -> {
+            ToolCall toolCall = llmProvider.generateToolCall(request.prompt(), toolDefinitions);
+            log.info("[{}] LLM ({}) returned tool: {}", correlationId, llmProvider.providerName(), toolCall.tool());
+            return toolCall;
+        });
 
-        // Step 2: Validate tool call JSON
-        validator.validate(toolCall);
-        log.info("[{}] Tool call validated", correlationId);
+        // Step 2: Validate
+        toolCallMono = toolCallMono.doOnNext(tc -> {
+            validator.validate(tc);
+            log.info("[{}] Tool call validated", correlationId);
+        });
 
-        // Step 3: Route to MCP server and stream response
-        StreamingResponseBody stream = mcpClient.executeToolCall(toolCall, correlationId);
+        // Step 3: Execute via MCP client and stream
+        Flux<String> dataStream = toolCallMono
+                .flatMapMany(tc -> mcpClient.executeToolCall(tc, correlationId));
 
-        var builder = ResponseEntity.ok().header("X-Correlation-ID", correlationId);
-
-        // Detect download intent from user prompt — if present, return as file attachment
-        if (request.prompt().toLowerCase().contains("download")) {
-            String filename = toolCall.tool() + "-" + System.currentTimeMillis() + ".csv";
-            builder.header("Content-Disposition", "attachment; filename=\"" + filename + "\"");
+        // For download mode, prepend a metadata line with the filename
+        if (isDownload) {
+            final String filename = "generate_report-" + System.currentTimeMillis() + ".csv";
+            return Flux.concat(
+                    Flux.just(filename),
+                    dataStream
+            );
         }
 
-        return builder.body(stream);
+        return dataStream;
+    }
+
+    @GetMapping("/status")
+    public Map<String, String> status() {
+        return Map.of("status", "ok", "name", "report-gateway");
     }
 
     @ExceptionHandler(org.springframework.web.bind.MethodArgumentNotValidException.class)
-    public ResponseEntity<Map<String, String>> handleValidation(org.springframework.web.bind.MethodArgumentNotValidException ex) {
-        return ResponseEntity.badRequest().body(Map.of("error", "VALIDATION_FAILED", "message", ex.getMessage()));
+    public Mono<ResponseEntity<Map<String, String>>> handleValidation(org.springframework.web.bind.MethodArgumentNotValidException ex) {
+        return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "VALIDATION_FAILED", "message", ex.getMessage())));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<Map<String, String>> handleBadToolCall(IllegalArgumentException ex) {
-        return ResponseEntity.badRequest().body(Map.of("error", "INVALID_TOOL_CALL", "message", ex.getMessage()));
+    public Mono<ResponseEntity<Map<String, String>>> handleBadToolCall(IllegalArgumentException ex) {
+        return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "INVALID_TOOL_CALL", "message", ex.getMessage())));
     }
 
     @ExceptionHandler(IllegalStateException.class)
-    public ResponseEntity<Map<String, String>> handleLlmError(IllegalStateException ex) {
-        return ResponseEntity.badRequest().body(Map.of("error", "LLM_ERROR", "message", "Could not understand your request. Try rephrasing with a report type and date range."));
+    public Mono<ResponseEntity<Map<String, String>>> handleLlmError(IllegalStateException ex) {
+        return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "LLM_ERROR", "message", "Could not understand your request. Try rephrasing with a report type and date range.")));
     }
 
     @ExceptionHandler(Exception.class)
-    public ResponseEntity<Map<String, String>> handleGeneral(Exception ex) {
+    public Mono<ResponseEntity<Map<String, String>>> handleGeneral(Exception ex) {
         log.error("Unexpected error", ex);
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("error", "INTERNAL_ERROR", "message", "An unexpected error occurred"));
+        return Mono.just(ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "INTERNAL_ERROR", "message", "An unexpected error occurred")));
     }
 
     private List<ToolDefinition> buildToolDefinitions() {

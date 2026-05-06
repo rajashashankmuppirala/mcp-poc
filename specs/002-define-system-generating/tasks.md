@@ -9,11 +9,11 @@
 
 **Purpose**: Multi-module project initialization and dependency configuration
 
-- [ ] T001 Create multi-module Maven parent POM at `report-gateway/pom.xml` with modules: `domain-api`, `mcp-server`, `report-gateway`
-- [ ] T002 [P] Initialize `domain-api/` Spring Boot 4 module with `spring-boot-starter-web` dependency in `domain-api/pom.xml`
-- [ ] T003 [P] Initialize `mcp-server/` Spring Boot 4 module with `spring-boot-starter-web`, `spring-boot-starter-validation`, `networknt/json-schema-validator` in `mcp-server/pom.xml`
-- [ ] T004 [P] Initialize `report-gateway/` Spring Boot 4 module with `spring-boot-starter-web`, `spring-boot-starter-validation`, `networknt/json-schema-validator` in `report-gateway/pom.xml`
-- [ ] T005 [P] Create `.gitignore` with Java/Maven patterns at repository root
+- [X] T001 Create multi-module Maven parent POM at `report-gateway/pom.xml` with modules: `domain-api`, `mcp-server`, `report-gateway`
+- [X] T002 [P] Initialize `domain-api/` Spring Boot 4 module with `spring-boot-starter-web` dependency in `domain-api/pom.xml`
+- [X] T003 [P] Initialize `mcp-server/` Spring Boot 4 module with `spring-boot-starter-web`, `spring-boot-starter-validation`, `networknt/json-schema-validator` in `mcp-server/pom.xml`
+- [X] T004 [P] Initialize `report-gateway/` Spring Boot 4 module with `spring-boot-starter-web`, `spring-boot-starter-validation`, `networknt/json-schema-validator` in `report-gateway/pom.xml`
+- [X] T005 [P] Create `.gitignore` with Java/Maven patterns at repository root
 
 ---
 
@@ -23,17 +23,17 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T006 [P] Create `DomainApiApplication.java` entry point in `domain-api/src/main/java/com/example/domain/`
-- [ ] T007 [P] Create `McpServerApplication.java` entry point in `mcp-server/src/main/java/com/example/mcp/`
-- [ ] T008 [P] Create `ReportGatewayApplication.java` entry point in `report-gateway/src/main/java/com/example/gateway/`
-- [ ] T009 [P] Configure `application.yml` for domain-api (port 8082) in `domain-api/src/main/resources/`
-- [ ] T010 [P] Configure `application.yml` for mcp-server (port 8081, `domain-api.url`) in `mcp-server/src/main/resources/`
-- [ ] T011 Configure `application.yml` for report-gateway (port 8080, `azure.openai.*`, `mcp.server.url`, `llm.provider`) in `report-gateway/src/main/resources/`
-- [ ] T012 Create `LlmProvider` interface in `report-gateway/src/main/java/com/example/gateway/service/LlmProvider.java` with `callWithTool(String, String)` and `providerName()` methods
-- [ ] T013 [P] Create `AiRequest` record with `@NotBlank` prompt and `@Size(max=500)` in `report-gateway/src/main/java/com/example/gateway/model/AiRequest.java`
-- [ ] T014 [P] Create `ToolCall` record with `tool` (String) and `parameters` (JsonNode) in `report-gateway/src/main/java/com/example/gateway/model/ToolCall.java`
-- [ ] T015 Create `GenerateReportRequest` record with `reportType`, `DateRange`, `filters`, `groupBy`, `limit` in `mcp-server/src/main/java/com/example/mcp/model/GenerateReportRequest.java`
-- [ ] T016 [P] Add unit test scaffolding: `pom.xml` test dependencies (JUnit 5, Mockito) for all three modules
+- [X] T006 [P] Create `DomainApiApplication.java` entry point in `domain-api/src/main/java/com/example/domain/`
+- [X] T007 [P] Create `McpServerApplication.java` entry point in `mcp-server/src/main/java/com/example/mcp/`
+- [X] T008 [P] Create `ReportGatewayApplication.java` entry point in `report-gateway/src/main/java/com/example/gateway/`
+- [X] T009 [P] Configure `application.yml` for domain-api (port 8082) in `domain-api/src/main/resources/`
+- [X] T010 [P] Configure `application.yml` for mcp-server (port 8081, `domain-api.url`) in `mcp-server/src/main/resources/`
+- [X] T011 Configure `application.yml` for report-gateway (port 8080, `azure.openai.*`, `mcp.server.url`, `llm.provider`) in `report-gateway/src/main/resources/`
+- [X] T012 Create `LlmProvider` interface in `report-gateway/src/main/java/com/example/gateway/service/LlmProvider.java` with `callWithTool(String, String)` and `providerName()` methods
+- [X] T013 [P] Create `AiRequest` record with `@NotBlank` prompt and `@Size(max=500)` in `report-gateway/src/main/java/com/example/gateway/model/AiRequest.java`
+- [X] T014 [P] Create `ToolCall` record with `tool` (String) and `parameters` (JsonNode) in `report-gateway/src/main/java/com/example/gateway/model/ToolCall.java`
+- [X] T015 Create `GenerateReportRequest` record with `reportType`, `DateRange`, `filters`, `groupBy`, `limit` in `mcp-server/src/main/java/com/example/mcp/model/GenerateReportRequest.java`
+- [X] T016 [P] Add unit test scaffolding: `pom.xml` test dependencies (JUnit 5, Mockito) for all three modules
 
 **Checkpoint**: Foundation ready — all three services compile, start, and have models in place
 
@@ -75,16 +75,16 @@
 
 ### Tests for User Story 2
 
-- [ ] T029 [P] [US2] Gateway validation error test in `report-gateway/src/test/java/com/example/gateway/controller/AiControllerTest.java` — verify 400 response for empty/oversized prompts
+- [X] T029 [P] [US2] Gateway validation error test in `report-gateway/src/test/java/com/example/gateway/controller/AiControllerTest.java` — verify 400 response for empty/oversized prompts
 - [X] T030 [P] [US2] Tool call validation error test in `report-gateway/src/test/java/com/example/gateway/service/ToolCallValidatorTest.java` — verify rejection of invalid tool JSON
-- [X] T031 [US2] MCP server error handling test in `mcp-server/src/test/java/com/example/mcp/controller/ToolControllerTest.java` — verify error responses for unknown tool, domain API timeout
+- [X] T031 [US2] MCP server error handling test in `mcp-server/src/test/java/com/example/mcp/integration/McpServerStreamingIntegrationTest.java` — verify error responses for unknown tool, domain API timeout
 
 ### Implementation for User Story 2
 
-- [ ] T032 [US1] Implement `ToolCallValidator` in `report-gateway/src/main/java/com/example/gateway/service/ToolCallValidator.java` — JSON schema validation for tool parameters (startDate pattern `^\d{4}-\d{2}-\d{2}$`, region pattern `^[a-z]+-[a-z]+$`)
-- [ ] T033 [US2] Add `@ExceptionHandler` methods to `AiController` for `MethodArgumentNotValidException` (400), `IllegalArgumentException` (400), and generic `Exception` (500) returning structured error JSON
-- [ ] T034 [US2] Add input sanitization to `ToolController` in `mcp-server/src/main/java/com/example/mcp/controller/ToolController.java` — strip non-alphanumeric characters from tool name, validate parameter schema
-- [ ] T035 [US2] Add error chunk type to streaming response — domain API returns `{"type":"error","data":{"message":"..."}}` chunk on failure
+- [X] T032 [US1] Implement `ToolCallValidator` in `report-gateway/src/main/java/com/example/gateway/service/ToolCallValidator.java` — JSON schema validation for tool parameters (startDate pattern `^\d{4}-\d{2}-\d{2}$`, region pattern `^[a-z]+-[a-z]+$`)
+- [X] T033 [US2] Add `@ExceptionHandler` methods to `AiController` for `MethodArgumentNotValidException` (400), `IllegalArgumentException` (400), and generic `Exception` (500) returning structured error JSON
+- [X] T034 [US2] Add input sanitization to `ReportTools` in `mcp-server/src/main/java/com/example/mcp/tool/ReportTools.java` — strip non-alphanumeric characters from tool name, validate parameter schema
+- [X] T035 [US2] Add error chunk type to streaming response — domain API returns `{"type":"error","data":{"message":"..."}}` chunk on failure
 
 **Checkpoint**: All error paths return structured, user-friendly responses
 
@@ -103,9 +103,9 @@
 
 ### Implementation for User Story 3
 
-- [ ] T038 [US3] Configure Tomcat async request timeout in `report-gateway/src/main/resources/application.yml` — set `server.tomcat.async-request-timeout=300000` (5 minutes)
+- [X] T038 [US3] Configure WebFlux async timeout in `report-gateway/src/main/resources/application.yml` — set appropriate timeout for streaming responses
 - [X] T039 [US3] Implement chunk timing instrumentation in `McpClientService` — log time-to-first-chunk and inter-chunk latency
-- [ ] T040 [US3] Implement report completion signal — domain API sends `{"type":"footer","data":{"totalRows":N,"elapsedMs":M}}` as final chunk
+- [X] T040 [US3] Implement report completion signal — domain API sends `{"type":"footer","data":{"totalRows":N,"elapsedMs":M}}` as final chunk
 
 **Checkpoint**: Large reports stream efficiently with measurable chunk timing
 

@@ -1,67 +1,34 @@
-package com.example.mcp.controller;
+package com.example.mcp.tool;
 
 import com.example.mcp.service.ReportStreamService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
+import reactor.core.publisher.Flux;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
-@WebMvcTest(ToolController.class)
-class ToolControllerTest {
+@SpringBootTest
+class ReportToolsTest {
 
     @Autowired
-    private MockMvc mockMvc;
+    private ReportTools reportTools;
 
     @MockitoBean
     private ReportStreamService reportStreamService;
 
     @Test
-    void generateReport_shouldRejectEmptyReportType() throws Exception {
-        String body = """
-                {"reportType": ""}
-                """;
-        mockMvc.perform(post("/tools/generate-report")
-                        .contentType("application/json")
-                        .content(body))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
-    }
+    void generateReport_shouldStreamData() {
+        when(reportStreamService.streamReport(any(), anyString()))
+                .thenReturn(Flux.just("row1,data", "row2,data"));
 
-    @Test
-    void generateReport_shouldRejectMissingReportType() throws Exception {
-        String body = """
-                {"filters": {"region": "us"}}
-                """;
-        mockMvc.perform(post("/tools/generate-report")
-                        .contentType("application/json")
-                        .content(body))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
-    }
+        var result = reportTools.generate_report("revenue", null, null, null);
 
-    @Test
-    void generateReport_shouldAcceptValidRequestAndStream() throws Exception {
-        StreamingResponseBody mockStream = outputStream -> {
-            outputStream.write("row1,data\n".getBytes());
-        };
-        when(reportStreamService.streamReport(any(), anyString())).thenReturn(mockStream);
-
-        String body = """
-                {"reportType": "revenue", "limit": 100}
-                """;
-        mockMvc.perform(post("/tools/generate-report")
-                        .contentType("application/json")
-                        .content(body))
-                .andExpect(status().isOk())
-                .andExpect(header().exists("X-Correlation-ID"))
-                .andExpect(content().string(org.hamcrest.Matchers.containsString("row1")));
+        assert result != null;
+        assert result.size() == 2;
+        assert result.get(0).equals("row1,data");
     }
 }

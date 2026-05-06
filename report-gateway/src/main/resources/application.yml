@@ -1,18 +1,42 @@
 server:
   port: 8080
 
+# Spring Cloud Gateway routes
+spring:
+  cloud:
+    gateway:
+      routes:
+        # Serve index.html at root
+        - id: static-index
+          uri: forward:/
+          predicates:
+            - Path=/
+          filters:
+            - RewritePath=/, /index.html
+
+  # Spring AI MCP Client — connects to MCP Server via SSE
+  ai:
+    mcp:
+      client:
+        name: "report-gateway-client"
+        version: "1.0.0"
+        request-timeout: 60s
+        protocol: sse
+        sse:
+          connections:
+            mcp-server:
+              url: ${MCP_SERVER_URL:http://localhost:8081}
+
+# LLM Provider configuration
 llm:
-  provider: ${LLM_PROVIDER:azure-openai}
+  provider: ${LLM_PROVIDER:mock}
   azure:
     endpoint: ${AZURE_OPENAI_ENDPOINT:http://localhost:9999}
     api-key: ${AZURE_OPENAI_API_KEY:test-key}
     deployment: ${AZURE_OPENAI_DEPLOYMENT:gpt-4o-mini}
     api-version: "2024-06-01"
 
-mcp-server:
-  url: ${MCP_SERVER_URL:http://localhost:8081}
-
 logging:
   level:
-    com.example.gateway: INFO
-    com.example.gateway.service.McpClientService: DEBUG
+    com.example.gateway: DEBUG
+    org.springframework.ai: DEBUG
