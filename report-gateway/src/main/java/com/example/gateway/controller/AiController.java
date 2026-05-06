@@ -32,6 +32,7 @@ public class AiController {
     private final ToolCallValidator validator;
     private final McpClientService mcpClient;
     private final List<ToolDefinition> toolDefinitions;
+    private final ObjectMapper mapper = new ObjectMapper();
 
     public AiController(LlmProvider llmProvider, ToolCallValidator validator, McpClientService mcpClient) {
         this.llmProvider = llmProvider;
@@ -60,20 +61,28 @@ public class AiController {
             log.info("[{}] Tool call validated", correlationId);
         });
 
-        // Step 3: Execute via MCP client and stream
-        Flux<String> dataStream = toolCallMono
-                .flatMapMany(tc -> mcpClient.executeToolCall(tc, correlationId));
+        // Step 3: Execute via MCP client, parse JSON array, emit rows as SSE
+        Flux<String> rowStream = toolCallMono
+                .flatMapMany(tc -> mcpClient.executeToolCall(tc, correlationId))
+                .flatMap(jsonArray -> {
+                    // MCP server returns JSON array like ["row1\n","row2\n",...]
+                    try {
+                        List<String> rows = mapper.readValue(jsonArray,
+                                mapper.getTypeFactory().constructCollectionType(List.class, String.class));
+                        return Flux.fromIterable(rows);
+                    } catch (Exception e) {
+                        log.warn("[{}] Failed to parse MCP array, emitting raw: {}", correlationId, e.getMessage());
+                        return Flux.just(jsonArray);
+                    }
+                });
 
         // For download mode, prepend a metadata line with the filename
         if (isDownload) {
             final String filename = "generate_report-" + System.currentTimeMillis() + ".csv";
-            return Flux.concat(
-                    Flux.just(filename),
-                    dataStream
-            );
+            return Flux.concat(Flux.just(filename), rowStream);
         }
 
-        return dataStream;
+        return rowStream;
     }
 
     @GetMapping("/status")

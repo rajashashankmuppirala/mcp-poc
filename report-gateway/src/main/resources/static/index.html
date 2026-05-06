@@ -112,13 +112,17 @@
     return { pre: pre, cursor: cursor, msg: msg };
   }
 
-  // Parse SSE event: extract data from "data: <payload>\n" lines
+  // Parse SSE event: extract data from "data:<payload>" or "data: <payload>" lines
   function parseSSE(rawText) {
     var lines = rawText.split('\n');
     var dataLines = [];
     for (var i = 0; i < lines.length; i++) {
-      if (lines[i].indexOf('data: ') === 0) {
-        dataLines.push(lines[i].substring(6));
+      var line = lines[i];
+      if (line.indexOf('data:') === 0) {
+        var payload = line.length > 5 ? line.substring(5) : '';
+        // Handle both "data:" and "data: " formats
+        if (payload.charAt(0) === ' ') payload = payload.substring(1);
+        if (payload.trim()) dataLines.push(payload);
       }
     }
     return dataLines;
