@@ -30,14 +30,23 @@ mcp:
     initialization-timeout: 30s
 
 # LLM Provider configuration
+#
+# Supported providers:
+#   mock             — keyword-based fake provider (for testing)
+#   openai-compatible — Any OpenAI Chat Completions API compatible endpoint:
+#     - OpenAI:        endpoint=https://api.openai.com/v1, model=gpt-4o
+#     - MiniMax:       endpoint=https://api.minimax.chat/v1, model=MiniMax-M2
+#     - Ollama:        endpoint=http://localhost:11434/v1, model=llama3
+#     - Groq:          endpoint=https://api.groq.com/openai/v1, model=llama-3.1-70b
+#     - OpenRouter:    endpoint=https://openrouter.ai/api/v1, model=anthropic/claude-sonnet-4-20250514
+#
 llm:
   provider: ${LLM_PROVIDER:mock}
   fallback-message: ${LLM_FALLBACK_MESSAGE:Sorry, I cannot help with this request.}
-  azure:
-    endpoint: ${AZURE_OPENAI_ENDPOINT:http://localhost:9999}
-    api-key: ${AZURE_OPENAI_API_KEY:test-key}
-    deployment: ${AZURE_OPENAI_DEPLOYMENT:gpt-4o-mini}
-    api-version: "2024-06-01"
+  openai:
+    endpoint: ${LLM_ENDPOINT:https://api.openai.com/v1}
+    api-key: ${LLM_API_KEY:}
+    model: ${LLM_MODEL:gpt-4o}
 
 # Skills configuration — directory of Markdown files with frontmatter
 skills:

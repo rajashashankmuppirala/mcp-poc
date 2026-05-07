@@ -29,7 +29,10 @@ services:
       - "8080:8080"
     environment:
       - SPRING_PROFILES_ACTIVE=docker
-      - LLM_PROVIDER=mock
+      - LLM_PROVIDER=${LLM_PROVIDER:-mock}
+      - LLM_ENDPOINT=${LLM_ENDPOINT:-https://api.openai.com/v1}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
       - MCP_SERVER_URL=http://mcp-server:8081
       - OPS_MCP_SERVER_URL=http://ops-mcp-server:8083
     depends_on:

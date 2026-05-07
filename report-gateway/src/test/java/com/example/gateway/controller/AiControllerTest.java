@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 
@@ -59,7 +60,7 @@ class AiControllerTest {
     void handleAiRequest_shouldCallLLMThenMCP() {
         ToolCall toolCall = new ToolCall("generate_report",
                 new ObjectMapper().createObjectNode().put("region", "us-east"));
-        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(toolCall);
+        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(Mono.just(toolCall));
         when(llmProvider.providerName()).thenReturn("mock");
         when(mcpClient.executeToolCall(any(), anyString(), any())).thenReturn(Flux.just("report data"));
 
@@ -93,7 +94,7 @@ class AiControllerTest {
     void handleAiRequest_shouldReturnErrorForBadToolCall() {
         ToolCall toolCall = new ToolCall("unknown_tool",
                 new ObjectMapper().createObjectNode());
-        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(toolCall);
+        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(Mono.just(toolCall));
         when(llmProvider.providerName()).thenReturn("mock");
         when(mcpClient.executeToolCall(any(), anyString(), any()))
                 .thenReturn(Flux.error(new IllegalArgumentException("Unknown tool")));
@@ -111,7 +112,7 @@ class AiControllerTest {
     @Test
     void handleAiRequest_shouldReturnErrorForLlmFailure() {
         when(llmProvider.generateToolCall(anyString(), any(), any()))
-                .thenThrow(new IllegalStateException("LLM failed"));
+                .thenReturn(Mono.error(new IllegalStateException("LLM failed")));
 
         webTestClient.post()
                 .uri("/ai/request")
@@ -125,7 +126,7 @@ class AiControllerTest {
 
     @Test
     void handleAiRequest_shouldReturnFallbackWhenLlmReturnsNull() {
-        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(null);
+        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(Mono.empty());
         when(llmProvider.providerName()).thenReturn("mock");
 
         webTestClient.post()

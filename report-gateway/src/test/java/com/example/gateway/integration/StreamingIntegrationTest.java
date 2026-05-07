@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 
@@ -63,7 +64,7 @@ class StreamingIntegrationTest {
                 mapper.createObjectNode()
                         .put("reportType", "revenue")
                         .put("region", "us-east"));
-        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(mockToolCall);
+        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(Mono.just(mockToolCall));
         when(llmProvider.providerName()).thenReturn("mock");
 
         when(mcpClient.executeToolCall(any(), anyString(), any()))
@@ -88,7 +89,7 @@ class StreamingIntegrationTest {
     @Test
     void shouldRejectInvalidToolCall() {
         ToolCall invalidToolCall = new ToolCall("unknown_tool", mapper.createObjectNode());
-        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(invalidToolCall);
+        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(Mono.just(invalidToolCall));
         when(llmProvider.providerName()).thenReturn("mock");
         doThrow(new IllegalArgumentException("Unknown tool: unknown_tool")).when(validator).validate(any());
 
@@ -120,7 +121,7 @@ class StreamingIntegrationTest {
     @Test
     void shouldHandleLlmError() {
         when(llmProvider.generateToolCall(anyString(), any(), any()))
-                .thenThrow(new IllegalStateException("LLM returned natural language"));
+                .thenReturn(Mono.error(new IllegalStateException("LLM returned natural language")));
 
         webTestClient.post()
                 .uri("/ai/request")
@@ -140,7 +141,7 @@ class StreamingIntegrationTest {
                         .put("region", "us-east")
                         .put("startDate", "2026-01-01")
                         .put("endDate", "2026-03-31"));
-        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(mockToolCall);
+        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(Mono.just(mockToolCall));
         when(llmProvider.providerName()).thenReturn("mock");
         when(mcpClient.executeToolCall(any(), anyString(), any())).thenReturn(Flux.just("test"));
 

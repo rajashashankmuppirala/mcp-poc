@@ -66,7 +66,7 @@ public class SkillRegistry {
      * Called by ToolDiscoveryInitializer after fetching GET /skills from each MCP server.
      * Logs warnings if local skill's allowed_tools are not present on the server.
      */
-    public void validateAgainstServer(String serverId, List<com.example.gateway.model.SkillDefinition> serverSkills) {
+    public void validateAgainstServer(String serverId, List<SkillDefinition> serverSkills) {
         for (var serverSkill : serverSkills) {
             SkillDefinition local = skillByName.get(serverSkill.name());
             if (local == null) {

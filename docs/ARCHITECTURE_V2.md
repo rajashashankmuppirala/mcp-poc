@@ -18,8 +18,8 @@ flowchart TD
     LLM[LLM Provider]
     SkillReg[SkillRegistry]
     MCPClient[MCP Client multi-server]
-    ReportsMCP[Reports MCP Server :8081]
-    OpsMCP[Ops MCP Server :8083]
+    ReportsMCP[Reports MCP :8081<br/>GET /skills]
+    OpsMCP[Ops MCP Server :8083<br/>GET /skills]
     ReportTools[ReportTools generate_report]
     OpsTools[OpsTools list_failed_jobs list_successful_dataflows]
     DomainAPI[Domain API :8082]
@@ -181,16 +181,61 @@ When the user asks for a report:
 3. Use date ranges if provided
 ```
 
+### Skill Validation at Startup
+
+Skills are defined as Markdown files on the gateway and validated against MCP server capabilities at startup:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant GW as Gateway Startup
+    participant SR as SkillRegistry
+    participant RMCP as Reports MCP :8081
+    participant OMCP as Ops MCP :8083
+
+    GW->>SR: Load skills from markdown files
+    Note over SR: Parse frontmatter: name, triggers,<br/>mcp_server, allowed_tools
+    SR-->>GW: 3 skills loaded
+
+    GW->>RMCP: GET /skills
+    RMCP-->>GW: [{name: "report_analyst", ...}, {name: "chart_builder", ...}]
+    GW->>SR: validateAgainstServer("reports", serverSkills)
+    Note over SR: Compare local vs server tools<br/>Log warnings for mismatches
+
+    GW->>OMCP: GET /skills
+    OMCP-->>GW: [{name: "operations_monitor", ...}]
+    GW->>SR: validateAgainstServer("ops", serverSkills)
+
+    Note over GW,SR: Any server-only skills (not in local<br/>markdown) are auto-registered
+```
+
+**Validation behavior**:
+- If a local skill declares tools not present on the server → **WARNING logged**
+- If a server exposes tools not in the local markdown → **INFO logged**
+- If a server exposes a skill not defined locally → **skill auto-registered**
+- If the `/skills` endpoint is unreachable → **fallback to local skills only**
+
 ### How Skills Work
 
 ```mermaid
 flowchart LR
-    Prompt["User prompt\nshow me revenue report"] --> Match["SkillRegistry.matchSkill()\nkeyword scan of triggers"]
-    Match -->|matched| Load["Load skill metadata\nfrom frontmatter"]
-    Load --> Scope["Filter tools to\nallowed_tools only"]
-    Load --> Inject["Attach systemPrompt\nfrom markdown body"]
-    Scope --> LLM["LLM receives:\n- scoped tools\n- system prompt"]
-    Inject --> LLM
+    subgraph "Startup: Skill Loading"
+        MD["Markdown files\nsrc/main/resources/skills/*.md"] --> Parse["Parse frontmatter"]
+        Parse --> Local["Local skills loaded"]
+        SRV["MCP Servers\nGET /skills"] --> SrvSkills["Server skills discovered"]
+        Local --> Merge["Validate + merge"]
+        SrvSkills --> Merge
+        Merge --> Registry["SkillRegistry\nmerged skill map"]
+    end
+
+    subgraph "Runtime: Request Handling"
+        Prompt["User prompt\nshow me revenue report"] --> Match["SkillRegistry.matchSkill()\nkeyword scan of triggers"]
+        Match -->|matched| Load["Load skill metadata"]
+        Load --> Scope["Filter tools to\nallowed_tools only"]
+        Load --> Inject["Attach systemPrompt\nfrom markdown body"]
+        Scope --> LLM["LLM receives:\n- scoped tools\n- system prompt"]
+        Inject --> LLM
+    end
 ```
 
 ### Skill Routing Table
@@ -435,7 +480,7 @@ sequenceDiagram
     Note over Spring,SR: Phase 1: Load skill files
     Spring->>SR: SkillRegistry(config-dir)
     SR->>FS: scan *.md files
-    FS-->>SR: report_analyst.md, operations_monitor.md
+    FS-->>SR: report_analyst.md, operations_monitor.md, chart_builder.md
     SR->>SR: Parse frontmatter + markdown body
     Note over SR: name, description, triggers<br/>mcp_server, allowed_tools<br/>systemPrompt = markdown body
 
@@ -446,6 +491,16 @@ sequenceDiagram
     RMCP-->>MC: [generate_report {schema...}]
     OMCP-->>MC: [list_failed_jobs, list_successful_dataflows]
     MC->>MC: Build toolServerMap:<br/>generate_report -> reports<br/>list_failed_jobs -> ops<br/>list_successful_dataflows -> ops
+
+    Note over Spring,OMCP: Phase 3: Validate skills against servers
+    MC->>RMCP: GET /skills
+    RMCP-->>MC: [report_analyst, chart_builder]
+    MC->>SR: validateAgainstServer("reports", skills)
+    Note over SR: Compare local vs server tools<br/>Log warnings for mismatches
+
+    MC->>OMCP: GET /skills
+    OMCP-->>MC: [operations_monitor]
+    MC->>SR: validateAgainstServer("ops", skills)
 ```
 
 ### Skill File Parsing
@@ -671,6 +726,7 @@ MCP Server → Domain API (Bearer token)
 | Gateway | Spring Boot 4.0.0 | WebFlux reactive framework |
 | Gateway | io.modelcontextprotocol.sdk:mcp 0.17.0 | Raw MCP client (Streamable HTTP) |
 | Gateway | Spring Core ResourceResolver | Markdown skill file scanning |
+| Gateway | LlmProvider (pluggable) | NL → ToolCall via mock or OpenAI-compatible endpoint |
 | Gateway | ChartGenerationService | Two-phase chart planning + Vega-Lite spec generation |
 | Gateway | Vega-Lite (client-side) | Browser chart rendering via vega-embed |
 | Reports MCP | Spring AI MCP Server 1.1.5 | MCP server with @McpTool |
@@ -686,22 +742,26 @@ MCP Server → Domain API (Bearer token)
 |-----------|------|---------|
 | Gateway Controller | `report-gateway/.../controller/AiController.java` | WebFlux SSE (`/ai/request`), chart JSON (`/ai/chart`), skill matching, prompt injection check |
 | MCP Client Config | `report-gateway/.../config/McpClientConfig.java` | Multi-server MCP client beans (reports + ops) |
-| Tool Discovery | `report-gateway/.../config/ToolDiscoveryInitializer.java` | Discovers tools from all servers, builds routing map |
+| Tool Discovery | `report-gateway/.../config/ToolDiscoveryInitializer.java` | Discovers tools + validates skills against servers via GET /skills |
 | MCP Client Service | `report-gateway/.../service/McpClientService.java` | Multi-server tool execution, auto-routing via toolServerMap |
-| Skill Registry | `report-gateway/.../service/SkillRegistry.java` | Markdown file scanning, frontmatter parsing, keyword matching |
+| Skill Registry | `report-gateway/.../service/SkillRegistry.java` | Markdown skills + server capability validation + merge |
 | Report Analyst Skill | `report-gateway/.../resources/skills/report_analyst.md` | Business report agent definition + system prompt |
 | Ops Monitor Skill | `report-gateway/.../resources/skills/operations_monitor.md` | Operations monitoring agent definition + system prompt |
 | Chart Builder Skill | `report-gateway/.../resources/skills/chart_builder.md` | Chart visualization agent with two-phase flow |
 | Chart Generation | `report-gateway/.../service/ChartGenerationService.java` | Two-phase: plan data query → generate Vega-Lite spec |
 | Chart Model | `report-gateway/.../model/ChartResponse.java` | Record: chartType, title, vegaLiteSpec, dataSummary |
-| LLM Provider | `report-gateway/.../service/MockLlmProvider.java` | NL to ToolCall (skill-aware, ops + reports + chart specs) |
+| LLM Interface | `report-gateway/.../service/LlmProvider.java` | Pluggable interface for NL → ToolCall conversion |
+| LLM Provider (mock) | `report-gateway/.../service/MockLlmProvider.java` | Keyword-based mock for testing |
+| LLM Provider (real) | `report-gateway/.../service/GenericOpenAiProvider.java` | OpenAI-compatible REST API (MiniMax, Ollama, Groq, etc.) |
 | Prompt Injection | `report-gateway/.../service/PromptInjectionDetector.java` | Detects injection patterns |
 | Tool Validator | `report-gateway/.../service/ToolCallValidator.java` | Tool allowlist + parameter regex |
 | Rate Limiter | `report-gateway/.../filter/RequestLoggingWebFilter.java` | Rate limiting + correlation IDs |
 | Audit Logger | `report-gateway/.../service/AuditLogger.java` | Audit trail with correlation IDs |
 | Reports MCP Tool | `mcp-server/.../tool/ReportTools.java` | @McpTool generate_report |
 | Reports MCP Svc | `mcp-server/.../service/ReportStreamService.java` | WebClient to Domain API with Bearer auth |
+| Reports Skills | `mcp-server/.../controller/SkillsController.java` | GET /skills — exposes report_analyst + chart_builder |
 | Ops MCP Tools | `ops-mcp-server/.../tool/OpsTools.java` | @McpTool list_failed_jobs, list_successful_dataflows |
+| Ops Skills | `ops-mcp-server/.../controller/SkillsController.java` | GET /skills — exposes operations_monitor |
 | Ops Data Service | `ops-mcp-server/.../service/OpsDataService.java` | Simulated failed job and dataflow data |
 | Domain Controller | `domain-api/.../controller/ReportStreamController.java` | NDJSON streaming |
 | Frontend | `report-gateway/.../static/index.html` | Chat UI with SSE parsing |
@@ -741,11 +801,11 @@ docker compose up --build
 ```yaml
 # application.yml (report-gateway)
 llm:
-  provider: ${LLM_PROVIDER:mock}
-  azure:
-    endpoint: ${AZURE_OPENAI_ENDPOINT:http://localhost:9999}
-    api-key: ${AZURE_OPENAI_API_KEY:test-key}
-    deployment: ${AZURE_OPENAI_DEPLOYMENT:gpt-4o-mini}
+  provider: ${LLM_PROVIDER:mock}          # mock | openai-compatible
+  openai:
+    endpoint: ${LLM_ENDPOINT:https://api.openai.com/v1}
+    api-key: ${LLM_API_KEY:}
+    model: ${LLM_MODEL:gpt-4o}
 
 # Multi-server MCP configuration
 mcp:

@@ -103,16 +103,13 @@ public class AiController {
 
         boolean isDownload = request.prompt().toLowerCase().contains("download");
 
-        // Step 1: Call LLM provider with skill system prompt
-        Mono<ToolCall> toolCallMono = Mono.fromCallable(() -> {
-            ToolCall toolCall = llmProvider.generateToolCall(request.prompt(), tools, systemPrompt);
-            if (toolCall == null) {
-                log.info("[{}] LLM ({}) returned null — prompt does not match any tool", correlationId, llmProvider.providerName());
-                throw new NoToolMatchException(fallbackMessage);
-            }
-            log.info("[{}] LLM ({}) returned tool: {}", correlationId, llmProvider.providerName(), toolCall.tool());
-            return toolCall;
-        });
+        // Step 1: Call LLM provider with skill system prompt (fully reactive)
+        Mono<ToolCall> toolCallMono = llmProvider.generateToolCall(request.prompt(), tools, systemPrompt)
+                .switchIfEmpty(Mono.defer(() -> {
+                    log.info("[{}] LLM ({}) returned null — prompt does not match any tool", correlationId, llmProvider.providerName());
+                    return Mono.error(new NoToolMatchException(fallbackMessage));
+                }))
+                .doOnNext(tc -> log.info("[{}] LLM ({}) returned tool: {}", correlationId, llmProvider.providerName(), tc.tool()));
 
         // Step 2: Validate
         toolCallMono = toolCallMono.doOnNext(tc -> {
@@ -178,19 +175,19 @@ public class AiController {
         String systemPrompt = skill.systemPrompt();
         String userToken = exchange.getRequest().getHeaders().getFirst("X-User-Token");
 
-        // Phase 1: LLM plans which data tool to call
-        return Mono.fromCallable(() -> {
-                    ToolCall tc = chartService.planDataQuery(request.prompt(), tools, systemPrompt);
-                    if (tc == null) throw new NoToolMatchException(fallbackMessage);
-                    return tc;
-                })
-                .doOnNext(tc -> { validator.validate(tc); })
+        // Phase 1: LLM plans which data tool to call (fully reactive)
+        return chartService.planDataQuery(request.prompt(), tools, systemPrompt)
+                .switchIfEmpty(Mono.defer(() -> {
+                    log.info("[{}] LLM returned null for chart planning", correlationId);
+                    return Mono.error(new NoToolMatchException(fallbackMessage));
+                }))
+                .doOnNext(tc -> validator.validate(tc))
                 // Phase 2a: Execute tool → collect raw data rows into single string
                 .flatMap(tc -> mcpClient.executeToolCall(tc, correlationId, userToken)
                         .collectList()
                         .map(rows -> String.join("\n", rows)))
                 // Phase 2b: LLM generates Vega-Lite spec from the data
-                .map(rawData -> chartService.generateChartSpec(
+                .flatMap(rawData -> chartService.generateChartSpec(
                         request.prompt(), rawData, null, systemPrompt))
                 .doOnSuccess(resp -> auditLogger.log(correlationId, "CHART_REQUEST", Map.of(
                         "skill", skill.name(),

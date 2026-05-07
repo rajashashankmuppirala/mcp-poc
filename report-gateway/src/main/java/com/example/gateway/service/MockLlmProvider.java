@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 
@@ -37,16 +38,14 @@ public class MockLlmProvider implements LlmProvider {
     );
 
     @Override
-    public ToolCall generateToolCall(String userMessage, List<ToolDefinition> tools, String systemPrompt) {
+    public Mono<ToolCall> generateToolCall(String userMessage, List<ToolDefinition> tools, String systemPrompt) {
         log.info("Mock LLM processing prompt: {}{}", userMessage,
                 systemPrompt != null ? " (skill prompt: " + systemPrompt.substring(0, Math.min(50, systemPrompt.length())) + "...)" : "");
 
         String lower = userMessage.toLowerCase();
 
-        // Check if any tool matches the prompt
         List<String> toolNames = tools.stream().map(ToolDefinition::name).toList();
 
-        // Operations tools
         boolean isFailedJob = FAILED_JOB_KEYWORDS.stream().anyMatch(lower::contains)
                 || (lower.contains("failed") && lower.contains("job"));
         boolean isDataflow = DATAFLOW_KEYWORDS.stream().anyMatch(lower::contains)
@@ -56,27 +55,25 @@ public class MockLlmProvider implements LlmProvider {
             int hours = parseHours(lower);
             var params = mapper.createObjectNode();
             if (hours > 0) params.put("hours", hours);
-            return new ToolCall("list_failed_jobs", params);
+            return Mono.just(new ToolCall("list_failed_jobs", params));
         }
         if (isDataflow && toolNames.contains("list_successful_dataflows")) {
             int hours = parseHours(lower);
             var params = mapper.createObjectNode();
             if (hours > 0) params.put("hours", hours);
-            return new ToolCall("list_successful_dataflows", params);
+            return Mono.just(new ToolCall("list_successful_dataflows", params));
         }
         if ((isFailedJob || isDataflow) && toolNames.contains("list_failed_jobs")) {
-            // Fallback: if ops request but no specific tool available, try failed_jobs
             int hours = parseHours(lower);
             var params = mapper.createObjectNode();
             if (hours > 0) params.put("hours", hours);
-            return new ToolCall("list_failed_jobs", params);
+            return Mono.just(new ToolCall("list_failed_jobs", params));
         }
 
-        // Report tools
         boolean isReportRequest = REPORT_KEYWORDS.stream().anyMatch(lower::contains);
         if (!isReportRequest) {
             log.info("Mock LLM: prompt does not match any available tool, returning null");
-            return null;
+            return Mono.empty();
         }
 
         String region = lower.contains("us-east") ? "us-east"
@@ -87,9 +84,9 @@ public class MockLlmProvider implements LlmProvider {
             var params = mapper.createObjectNode();
             params.put("reportType", "revenue");
             if (region != null) params.put("region", region);
-            return new ToolCall("generate_report", params);
+            return Mono.just(new ToolCall("generate_report", params));
         } catch (Exception e) {
-            throw new IllegalStateException("Failed to build mock tool call", e);
+            return Mono.error(new IllegalStateException("Failed to build mock tool call", e));
         }
     }
 
@@ -110,10 +107,10 @@ public class MockLlmProvider implements LlmProvider {
     }
 
     @Override
-    public String generateText(String userMessage, String systemPrompt) {
+    public Mono<String> generateText(String userMessage, String systemPrompt) {
         log.info("Mock LLM generateText: {}{}", userMessage.substring(0, Math.min(50, userMessage.length())),
                 systemPrompt != null ? " (skill prompt)" : "");
-        return generateVegaLiteSpec(userMessage);
+        return Mono.just(generateVegaLiteSpec(userMessage));
     }
 
     /**

@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 
@@ -31,26 +32,26 @@ public class ChartGenerationService {
     /**
      * Phase 1: Ask the LLM to plan — which tool to call and what chart type.
      */
-    public ToolCall planDataQuery(String userMessage, List<ToolDefinition> tools, String systemPrompt) {
+    public Mono<ToolCall> planDataQuery(String userMessage, List<ToolDefinition> tools, String systemPrompt) {
         String planningPrompt = userMessage + "\n\n"
                 + "Respond with ONLY a tool call. Choose the best tool for fetching the data needed "
                 + "to create the requested visualization. Include relevant parameters.";
 
-        ToolCall toolCall = llmProvider.generateToolCall(planningPrompt, tools, systemPrompt);
-        if (toolCall == null) {
-            log.warn("LLM returned null for chart planning prompt");
-            return null;
-        }
-        log.info("Chart plan: tool={} params={}", toolCall.tool(), toolCall.parameters());
-        return toolCall;
+        return llmProvider.generateToolCall(planningPrompt, tools, systemPrompt)
+                .doOnNext(tc -> {
+                    log.info("Chart plan: tool={} params={}", tc.tool(), tc.parameters());
+                })
+                .doOnNext(tc -> {
+                    if (tc == null) log.warn("LLM returned null for chart planning prompt");
+                });
     }
 
     /**
      * Phase 2: Give the raw data to the LLM and ask it to produce a Vega-Lite spec.
      * Returns the spec as a JSON string (not JsonNode) for clean serialization.
      */
-    public ChartResponse generateChartSpec(String userMessage, String rawData,
-                                           String chartType, String systemPrompt) {
+    public Mono<ChartResponse> generateChartSpec(String userMessage, String rawData,
+                                                  String chartType, String systemPrompt) {
         String renderPrompt = String.format(
                 "Create a Vega-Lite JSON specification for a %s chart.\n\n"
                         + "User request: %s\n\n"
@@ -67,23 +68,25 @@ public class ChartGenerationService {
                 rawData.length() > 3000 ? rawData.substring(0, 3000) + "..." : rawData
         );
 
-        String result = llmProvider.generateText(renderPrompt, systemPrompt);
-        if (result == null || result.isBlank()) {
-            log.warn("LLM returned empty chart spec");
-            return new ChartResponse("bar", "Chart", "{}", "No data");
-        }
+        return llmProvider.generateText(renderPrompt, systemPrompt)
+                .map(result -> {
+                    if (result == null || result.isBlank()) {
+                        log.warn("LLM returned empty chart spec");
+                        return new ChartResponse("bar", "Chart", "{}", "No data");
+                    }
 
-        String cleaned = result.replaceAll("^```(?:json)?\\s*", "").replaceAll("\\s*```\\s*$", "").trim();
+                    String cleaned = result.replaceAll("^```(?:json)?\\s*", "").replaceAll("\\s*```\\s*$", "").trim();
 
-        try {
-            JsonNode spec = new com.fasterxml.jackson.databind.ObjectMapper().readTree(cleaned);
-            String title = spec.has("title") ? spec.get("title").asText() : "Generated Chart";
-            String actualType = chartType != null ? chartType : "bar";
-            String summary = "Vega-Lite spec generated with " + cleaned.length() + " chars";
-            return new ChartResponse(actualType, title, cleaned, summary);
-        } catch (Exception e) {
-            log.warn("Failed to parse Vega-Lite spec: {}", e.getMessage());
-            return new ChartResponse("bar", "Chart Error", cleaned, "Parse error: " + e.getMessage());
-        }
+                    try {
+                        JsonNode spec = new com.fasterxml.jackson.databind.ObjectMapper().readTree(cleaned);
+                        String title = spec.has("title") ? spec.get("title").asText() : "Generated Chart";
+                        String actualType = chartType != null ? chartType : "bar";
+                        String summary = "Vega-Lite spec generated with " + cleaned.length() + " chars";
+                        return new ChartResponse(actualType, title, cleaned, summary);
+                    } catch (Exception e) {
+                        log.warn("Failed to parse Vega-Lite spec: {}", e.getMessage());
+                        return new ChartResponse("bar", "Chart Error", cleaned, "Parse error: " + e.getMessage());
+                    }
+                });
     }
 }

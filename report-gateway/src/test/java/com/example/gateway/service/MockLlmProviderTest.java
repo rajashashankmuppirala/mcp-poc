@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -21,30 +23,38 @@ class MockLlmProviderTest {
     private final List<ToolDefinition> allTools = List.copyOf(
             new java.util.LinkedHashSet<>(java.util.stream.Stream.concat(reportTools.stream(), opsTools.stream()).toList()));
 
+    private ToolCall callGenerateToolCall(String prompt, List<ToolDefinition> tools, String systemPrompt) {
+        return provider.generateToolCall(prompt, tools, systemPrompt).block(Duration.ofSeconds(5));
+    }
+
+    private String callGenerateText(String prompt) {
+        return provider.generateText(prompt, null).block(Duration.ofSeconds(5));
+    }
+
     @Test
     void shouldReturnGenerateReportTool() {
-        ToolCall result = provider.generateToolCall("Show me revenue", allTools, null);
+        ToolCall result = callGenerateToolCall("Show me revenue", allTools, null);
 
         assertEquals("generate_report", result.tool());
     }
 
     @Test
     void shouldExtractRegionFromPrompt() {
-        ToolCall result = provider.generateToolCall("Show me sales for us-east", allTools, null);
+        ToolCall result = callGenerateToolCall("Show me sales for us-east", allTools, null);
 
         assertEquals("us-east", result.parameters().get("region").asText());
     }
 
     @Test
     void shouldExtractEuWestRegion() {
-        ToolCall result = provider.generateToolCall("Revenue report for eu-west", allTools, null);
+        ToolCall result = callGenerateToolCall("Revenue report for eu-west", allTools, null);
 
         assertEquals("eu-west", result.parameters().get("region").asText());
     }
 
     @Test
     void shouldDefaultReportTypeToRevenue() {
-        ToolCall result = provider.generateToolCall("Show me data", allTools, null);
+        ToolCall result = callGenerateToolCall("Show me data", allTools, null);
 
         assertEquals("revenue", result.parameters().get("reportType").asText());
     }
@@ -55,15 +65,16 @@ class MockLlmProviderTest {
     }
 
     @Test
-    void shouldReturnNullForUnmatchedPrompt() {
-        ToolCall result = provider.generateToolCall("What is the weather today?", allTools, null);
+    void shouldReturnEmptyForUnmatchedPrompt() {
+        Optional<ToolCall> result = provider.generateToolCall("What is the weather today?", allTools, null)
+                .blockOptional(Duration.ofSeconds(5));
 
-        assertNull(result);
+        assertTrue(result.isEmpty());
     }
 
     @Test
     void shouldReturnFailedJobsForOpsPrompt() {
-        ToolCall result = provider.generateToolCall("Show me failed jobs in the last 24 hours", opsTools, null);
+        ToolCall result = callGenerateToolCall("Show me failed jobs in the last 24 hours", opsTools, null);
 
         assertNotNull(result);
         assertEquals("list_failed_jobs", result.tool());
@@ -72,7 +83,7 @@ class MockLlmProviderTest {
 
     @Test
     void shouldReturnDataflowsForOpsPrompt() {
-        ToolCall result = provider.generateToolCall("What is the dataflow status", opsTools, null);
+        ToolCall result = callGenerateToolCall("What is the dataflow status", opsTools, null);
 
         assertNotNull(result);
         assertEquals("list_successful_dataflows", result.tool());

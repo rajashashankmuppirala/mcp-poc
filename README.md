@@ -327,6 +327,78 @@ POST /ai/chart
 
 ---
 
+## LLM Integration
+
+The gateway uses a pluggable `LlmProvider` interface to convert natural language prompts into structured tool calls. Two providers ship with the project:
+
+### Providers
+
+| Provider | Config Value | Use Case |
+|----------|-------------|----------|
+| **MockLlmProvider** | `mock` | Testing, offline development — uses keyword matching |
+| **GenericOpenAiProvider** | `openai-compatible` | Any OpenAI Chat Completions API compatible endpoint |
+
+### Configuration
+
+```yaml
+llm:
+  provider: ${LLM_PROVIDER:mock}       # mock | openai-compatible
+  fallback-message: ${LLM_FALLBACK_MESSAGE:Sorry, I cannot help with this request.}
+  openai:
+    endpoint: ${LLM_ENDPOINT:https://api.openai.com/v1}
+    api-key: ${LLM_API_KEY:}
+    model: ${LLM_MODEL:gpt-4o}
+```
+
+### Supported Endpoints (openai-compatible)
+
+| Provider | Endpoint URL | Example Model |
+|----------|-------------|---------------|
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
+| MiniMax | `https://api.minimax.chat/v1` | `MiniMax-M2` |
+| Ollama (local) | `http://localhost:11434/v1` | `llama3` |
+| Groq | `https://api.groq.com/openai/v1` | `llama-3.1-70b` |
+| OpenRouter | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4-20250514` |
+
+### Quick Start with a Real LLM
+
+**MiniMax:**
+```bash
+LLM_PROVIDER=openai-compatible \
+LLM_ENDPOINT=https://api.minimax.chat/v1 \
+LLM_API_KEY=your-minimax-key \
+LLM_MODEL=MiniMax-M2 \
+java -jar report-gateway/target/report-gateway-0.0.1-SNAPSHOT.jar --server.port=8080
+```
+
+**Ollama (local):**
+```bash
+ollama pull llama3
+LLM_PROVIDER=openai-compatible \
+LLM_ENDPOINT=http://localhost:11434/v1 \
+LLM_MODEL=llama3 \
+java -jar report-gateway/target/report-gateway-0.0.1-SNAPSHOT.jar --server.port=8080
+```
+
+**Docker Compose:**
+```bash
+LLM_PROVIDER=openai-compatible LLM_API_KEY=sk-xxx LLM_MODEL=gpt-4o docker compose up --build
+```
+
+### LLM Interface
+
+```java
+public interface LlmProvider {
+    ToolCall generateToolCall(String userMessage, List<ToolDefinition> tools, String systemPrompt);
+    String generateText(String userMessage, String systemPrompt);
+    String providerName();
+}
+```
+
+New providers only need to implement this interface and annotate with `@ConditionalOnProperty(name = "llm.provider", havingValue = "your-provider-id")`.
+
+---
+
 ## Security Architecture
 
 ### Defense-in-Depth Layers
@@ -396,7 +468,9 @@ mcp-poc/
 │       ├── config/ToolDiscoveryInitializer.java # Tool discovery + skill validation against servers
 │       ├── service/McpClientService.java       # Multi-server tool execution, auto-routing
 │       ├── service/SkillRegistry.java           # Markdown skills + server capability validation
-│       ├── service/MockLlmProvider.java         # NL → ToolCall (mock, skill-aware)
+│       ├── service/LlmProvider.java             # Interface for pluggable LLM providers
+│       ├── service/MockLlmProvider.java         # NL → ToolCall (keyword-based mock)
+│       ├── service/GenericOpenAiProvider.java   # NL → ToolCall (OpenAI-compatible REST API)
 │       ├── service/ToolCallValidator.java       # Tool allowlist + regex validation
 │       ├── service/PromptInjectionDetector.java # Injection pattern detection
 │       ├── service/AuditLogger.java             # Audit trail with correlation IDs
@@ -436,6 +510,7 @@ mcp-poc/
 | MCP Client | `io.modelcontextprotocol.sdk:mcp:0.17.0` (Streamable HTTP) |
 | MCP Server | Spring AI MCP Server 1.1.5 (`protocol: STREAMABLE`) |
 | Skills | Markdown files with YAML frontmatter (industry standard pattern) |
+| LLM | Pluggable `LlmProvider` interface — mock or any OpenAI-compatible endpoint |
 | Charts | Two-phase LLM pipeline → Vega-Lite JSON spec → client-side rendering |
 | Domain API | Spring Boot 4.0.0 (WebMVC) |
 | Runtime | Java 21 |
