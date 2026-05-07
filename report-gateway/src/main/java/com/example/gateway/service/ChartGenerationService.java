@@ -75,7 +75,22 @@ public class ChartGenerationService {
                         return new ChartResponse("bar", "Chart", "{}", "No data");
                     }
 
-                    String cleaned = result.replaceAll("^```(?:json)?\\s*", "").replaceAll("\\s*```\\s*$", "").trim();
+                    // Strip markdown code fences and <thinking> blocks
+                    String cleaned = result
+                            .replaceAll("(?s)<thinking>.*?</thinking>", "")
+                            .replaceAll("(?s)<think>.*?</think>", "")
+                            .replaceAll("^```(?:json)?\\s*", "")
+                            .replaceAll("\\s*```\\s*$", "")
+                            .trim();
+
+                    // If still not starting with {, try to find first { and last }
+                    if (!cleaned.startsWith("{")) {
+                        int firstBrace = cleaned.indexOf('{');
+                        int lastBrace = cleaned.lastIndexOf('}');
+                        if (firstBrace >= 0 && lastBrace > firstBrace) {
+                            cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+                        }
+                    }
 
                     try {
                         JsonNode spec = new com.fasterxml.jackson.databind.ObjectMapper().readTree(cleaned);
