@@ -55,7 +55,7 @@ For detailed architecture diagrams, see [ARCHITECTURE_V2.md](ARCHITECTURE_V2.md)
 
 ## Skills System (Multi-Agent)
 
-The gateway implements a **skills-based routing system** that narrows the LLM's tool context per request:
+The gateway implements a **skills-based routing system** that narrows the LLM's tool context per request. Skills are defined as **Markdown files** on the gateway and validated against MCP server capabilities at startup.
 
 | Skill | Triggers | MCP Server | Allowed Tools |
 |-------|----------|------------|---------------|
@@ -65,10 +65,11 @@ The gateway implements a **skills-based routing system** that narrows the LLM's 
 
 ### How Skills Work
 
-1. **Markdown files** — Each skill is a `.md` file in `src/main/resources/skills/` with YAML frontmatter for metadata and a markdown body for the agent system prompt
-2. **Keyword matching** — `SkillRegistry` scans the prompt for trigger keywords from frontmatter (<10ms match)
-3. **Tool scoping** — When a skill matches, only its `allowed_tools` are sent to the LLM, reducing attention dilution
-4. **System prompt injection** — The markdown body becomes the LLM's system prompt for behavioral guidance
+1. **Markdown files** — Each skill is a `.md` file in `src/main/resources/skills/` with YAML frontmatter for metadata (name, triggers, mcp_server, allowed_tools) and a markdown body for the agent system prompt
+2. **Server validation** — At startup, the gateway calls `GET /skills` on each MCP server to validate that declared skills and tools are actually available. Mismatches are logged as warnings; new server-discovered skills are added dynamically
+3. **Keyword matching** — `SkillRegistry` scans the prompt for trigger keywords from frontmatter (<10ms match)
+4. **Tool scoping** — When a skill matches, only its `allowed_tools` are sent to the LLM, reducing attention dilution
+5. **System prompt injection** — The markdown body becomes the LLM's system prompt for behavioral guidance
 
 ### Skill File Example
 
@@ -92,6 +93,25 @@ When the user asks for a report:
 3. Use date ranges if provided
 ```
 
+### MCP Server Skills Endpoint
+
+Each MCP server exposes a `GET /skills` endpoint that returns its capabilities:
+
+```json
+[
+  {
+    "name": "report_analyst",
+    "description": "Generate and analyze business reports",
+    "triggers": ["report", "revenue", "sales", "analytics"],
+    "allowedTools": ["generate_report"]
+  }
+]
+```
+
+This endpoint serves two purposes:
+- **Validation**: Gateway compares server-reported skills against local markdown definitions and logs warnings for mismatches
+- **Dynamic discovery**: If a server exposes a skill not defined locally, it is automatically registered
+
 ### Example Flows
 
 ```
@@ -106,6 +126,7 @@ When the user asks for a report:
 - **Rich instructions**: Full markdown body as system prompt — multi-paragraph instructions, examples, constraints
 - **Independent files**: Add/remove skills without touching shared config — different teams can own different skills
 - **Git-friendly**: Each skill is its own file with clean diffs and ownership
+- **Server-synced**: Skills are validated against MCP server capabilities at startup, ensuring declared skills match actual tool availability
 
 ---
 
@@ -372,9 +393,9 @@ mcp-poc/
 │   └── src/main/java/com/example/gateway/
 │       ├── controller/AiController.java        # WebFlux SSE (/ai/request), chart JSON (/ai/chart)
 │       ├── config/McpClientConfig.java         # Multi-server MCP client beans
-│       ├── config/ToolDiscoveryInitializer.java # Tool discovery + server routing map
+│       ├── config/ToolDiscoveryInitializer.java # Tool discovery + skill validation against servers
 │       ├── service/McpClientService.java       # Multi-server tool execution, auto-routing
-│       ├── service/SkillRegistry.java           # Markdown file scanning, frontmatter parsing
+│       ├── service/SkillRegistry.java           # Markdown skills + server capability validation
 │       ├── service/MockLlmProvider.java         # NL → ToolCall (mock, skill-aware)
 │       ├── service/ToolCallValidator.java       # Tool allowlist + regex validation
 │       ├── service/PromptInjectionDetector.java # Injection pattern detection
@@ -391,11 +412,15 @@ mcp-poc/
 ├── mcp-server/              # Reports MCP Server
 │   └── src/main/java/com/example/mcp/
 │       ├── tool/ReportTools.java                # @McpTool generate_report
-│       └── service/ReportStreamService.java     # WebClient → Domain API
+│       ├── service/ReportStreamService.java     # WebClient → Domain API
+│       ├── controller/SkillsController.java     # GET /skills — exposes skill metadata
+│       └── model/SkillDefinition.java           # Skill record for /skills endpoint
 ├── ops-mcp-server/          # Operations MCP Server
 │   └── src/main/java/com/example/ops/
 │       ├── tool/OpsTools.java                   # @McpTool list_failed_jobs, list_successful_dataflows
-│       └── service/OpsDataService.java          # Simulated ops data generation
+│       ├── service/OpsDataService.java          # Simulated ops data generation
+│       ├── controller/SkillsController.java     # GET /skills — exposes skill metadata
+│       └── model/SkillDefinition.java           # Skill record for /skills endpoint
 ├── domain-api/              # Spring Boot Domain API
 │   └── src/main/java/com/example/domain/
 │       └── controller/ReportStreamController.java  # NDJSON streaming

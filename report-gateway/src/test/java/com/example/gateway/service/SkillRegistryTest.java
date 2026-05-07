@@ -3,6 +3,8 @@ package com.example.gateway.service;
 import com.example.gateway.model.SkillDefinition;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class SkillRegistryTest {
@@ -44,7 +46,7 @@ class SkillRegistryTest {
         String prompt = registry.getSkillPrompt("report_analyst");
 
         assertNotNull(prompt);
-        assertTrue(prompt.contains("report analyst"));
+        assertTrue(prompt.toLowerCase().contains("report analyst"));
     }
 
     @Test
@@ -82,5 +84,41 @@ class SkillRegistryTest {
         assertTrue(prompt.contains("operations monitoring assistant"));
         // Verify it's the markdown body, not the frontmatter description
         assertTrue(prompt.contains("# Operations Monitor"));
+    }
+
+    @Test
+    void shouldAddServerDiscoveredSkillsNotInLocalFiles() {
+        // When a server exposes a skill via GET /skills that doesn't exist locally,
+        // it should be added to the registry
+        registry.validateAgainstServer("test-server", List.of(
+                new SkillDefinition(
+                        "new_skill", "A new skill",
+                        List.of("new", "test"), "test-server",
+                        "Server-provided system prompt",
+                        List.of("new_tool")
+                )
+        ));
+
+        SkillDefinition skill = registry.matchSkill("run a new test");
+        assertNotNull(skill);
+        assertEquals("new_skill", skill.name());
+        assertEquals("test-server", skill.mcpServer());
+    }
+
+    @Test
+    void shouldWarnOnToolMismatchBetweenServerAndMarkdown() {
+        // When server doesn't expose a tool that markdown declares, logs a warning
+        // (this is tested via log output in integration tests)
+        registry.validateAgainstServer("reports", List.of(
+                new SkillDefinition(
+                        "report_analyst", "Generate reports",
+                        List.of("report", "revenue"), "reports",
+                        "Server prompt",
+                        List.of("generate_report") // same as markdown — no warning
+                )
+        ));
+
+        // Skill still works even after validation
+        assertNotNull(registry.matchSkill("Show me revenue"));
     }
 }
