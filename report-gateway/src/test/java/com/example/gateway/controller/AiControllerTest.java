@@ -2,10 +2,7 @@ package com.example.gateway.controller;
 
 import com.example.gateway.model.ToolDefinition;
 import com.example.gateway.model.ToolCall;
-import com.example.gateway.service.LlmProvider;
-import com.example.gateway.service.McpClientService;
-import com.example.gateway.service.PromptInjectionDetector;
-import com.example.gateway.service.ToolCallValidator;
+import com.example.gateway.service.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,10 +25,14 @@ class AiControllerTest {
     private final ToolCallValidator validator = mock(ToolCallValidator.class);
     private final McpClientService mcpClient = mock(McpClientService.class);
     private final PromptInjectionDetector injectionDetector = mock(PromptInjectionDetector.class);
+    private final SkillRegistry skillRegistry = mock(SkillRegistry.class);
+    private final AuditLogger auditLogger = mock(AuditLogger.class);
+    private final ChartGenerationService chartService = mock(ChartGenerationService.class);
     private final String fallbackMessage = "Sorry, I cannot help with this request.";
 
     private final WebTestClient webTestClient = WebTestClient
-            .bindToController(new AiController(llmProvider, validator, mcpClient, injectionDetector, fallbackMessage))
+            .bindToController(new AiController(llmProvider, validator, mcpClient, injectionDetector,
+                    skillRegistry, auditLogger, chartService, fallbackMessage))
             .build();
 
     @BeforeEach
@@ -51,13 +52,14 @@ class AiControllerTest {
                 new ToolDefinition("generate_report", "Generate a structured report", params)
         );
         when(mcpClient.getDiscoveredTools()).thenReturn(tools);
+        when(skillRegistry.matchSkill(anyString())).thenReturn(null); // no skill match by default
     }
 
     @Test
     void handleAiRequest_shouldCallLLMThenMCP() {
         ToolCall toolCall = new ToolCall("generate_report",
                 new ObjectMapper().createObjectNode().put("region", "us-east"));
-        when(llmProvider.generateToolCall(anyString(), any())).thenReturn(toolCall);
+        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(toolCall);
         when(llmProvider.providerName()).thenReturn("mock");
         when(mcpClient.executeToolCall(any(), anyString(), any())).thenReturn(Flux.just("report data"));
 
@@ -91,7 +93,7 @@ class AiControllerTest {
     void handleAiRequest_shouldReturnErrorForBadToolCall() {
         ToolCall toolCall = new ToolCall("unknown_tool",
                 new ObjectMapper().createObjectNode());
-        when(llmProvider.generateToolCall(anyString(), any())).thenReturn(toolCall);
+        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(toolCall);
         when(llmProvider.providerName()).thenReturn("mock");
         when(mcpClient.executeToolCall(any(), anyString(), any()))
                 .thenReturn(Flux.error(new IllegalArgumentException("Unknown tool")));
@@ -108,7 +110,7 @@ class AiControllerTest {
 
     @Test
     void handleAiRequest_shouldReturnErrorForLlmFailure() {
-        when(llmProvider.generateToolCall(anyString(), any()))
+        when(llmProvider.generateToolCall(anyString(), any(), any()))
                 .thenThrow(new IllegalStateException("LLM failed"));
 
         webTestClient.post()
@@ -123,7 +125,7 @@ class AiControllerTest {
 
     @Test
     void handleAiRequest_shouldReturnFallbackWhenLlmReturnsNull() {
-        when(llmProvider.generateToolCall(anyString(), any())).thenReturn(null);
+        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(null);
         when(llmProvider.providerName()).thenReturn("mock");
 
         webTestClient.post()
@@ -148,7 +150,7 @@ class AiControllerTest {
                 .exchange()
                 .expectStatus().isBadRequest()
                 .expectBody()
-                .jsonPath("$.error").isEqualTo("LLM_ERROR");
+                .jsonPath("$.error").isEqualTo("NO_TOOL_MATCH");
     }
 
     @Test
@@ -160,5 +162,15 @@ class AiControllerTest {
                 .expectBody()
                 .jsonPath("$.count").isEqualTo(1)
                 .jsonPath("$.tools[0].name").isEqualTo("generate_report");
+    }
+
+    @Test
+    void listSkills_shouldReturnLoadedSkills() {
+        webTestClient.get()
+                .uri("/ai/skills")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.skills").isArray();
     }
 }

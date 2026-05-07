@@ -16,6 +16,13 @@ services:
     depends_on:
       - domain-api
 
+  ops-mcp-server:
+    build: ./ops-mcp-server
+    ports:
+      - "8083:8083"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+
   ai-gateway:
     build: ./report-gateway
     ports:
@@ -24,8 +31,10 @@ services:
       - SPRING_PROFILES_ACTIVE=docker
       - LLM_PROVIDER=mock
       - MCP_SERVER_URL=http://mcp-server:8081
+      - OPS_MCP_SERVER_URL=http://ops-mcp-server:8083
     depends_on:
       - mcp-server
+      - ops-mcp-server
 
   mock-llm:
     image: alpine:3.20

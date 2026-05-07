@@ -1,0 +1,18 @@
+server:
+  port: 8083
+
+# Spring AI MCP Server (Streamable HTTP protocol)
+spring:
+  ai:
+    mcp:
+      server:
+        protocol: STREAMABLE
+        name: "operations-monitoring-mcp-server"
+        version: "1.0.0"
+        streamable-http:
+          mcp-endpoint: /mcp
+
+logging:
+  level:
+    com.example.ops: DEBUG
+    org.springframework.ai: DEBUG

@@ -19,6 +19,11 @@ public class AzureOpenAiProvider implements LlmProvider {
 
     private static final Logger log = LoggerFactory.getLogger(AzureOpenAiProvider.class);
 
+    private static final String DEFAULT_SYSTEM_PROMPT =
+            "You are a report generation assistant. "
+            + "Given a user request, call exactly ONE of the available tools. "
+            + "Return ONLY the tool call — no explanation, no natural language.";
+
     private final RestClient restClient;
     private final String deployment;
     private final String apiVersion;
@@ -39,10 +44,12 @@ public class AzureOpenAiProvider implements LlmProvider {
     }
 
     @Override
-    public ToolCall generateToolCall(String userMessage, List<ToolDefinition> tools) {
-        log.info("Calling Azure OpenAI (deployment={}) with prompt: {}", deployment, userMessage);
+    public ToolCall generateToolCall(String userMessage, List<ToolDefinition> tools, String systemPrompt) {
+        String prompt = systemPrompt != null && !systemPrompt.isBlank() ? systemPrompt : DEFAULT_SYSTEM_PROMPT;
+        log.info("Calling Azure OpenAI (deployment={}) with prompt: {} [system: {}]",
+                deployment, userMessage, systemPrompt != null ? "custom" : "default");
 
-        String requestBody = buildRequestBody(userMessage, tools);
+        String requestBody = buildRequestBody(userMessage, tools, prompt);
 
         String uri = "/openai/deployments/" + deployment + "/chat/completions?api-version=" + apiVersion;
         String responseBody = restClient.post()
@@ -59,12 +66,40 @@ public class AzureOpenAiProvider implements LlmProvider {
         return "azure-openai";
     }
 
-    private String buildRequestBody(String userMessage, List<ToolDefinition> tools) {
-        String systemContent = "You are a report generation assistant. "
-                + "Given a user request, call exactly ONE of the available tools. "
-                + "Return ONLY the tool call — no explanation, no natural language.";
+    @Override
+    public String generateText(String userMessage, String systemPrompt) {
+        String prompt = systemPrompt != null && !systemPrompt.isBlank() ? systemPrompt : DEFAULT_SYSTEM_PROMPT;
+        log.info("Calling Azure OpenAI (deployment={}) generateText: {}", deployment, userMessage);
 
-        String messages = "[{\"role\":\"system\",\"content\":\"" + escapeJson(systemContent) + "\"},"
+        // Build request without tools — free-form text generation
+        String messages = "[{\"role\":\"system\",\"content\":\"" + escapeJson(prompt) + "\"},"
+                + "{\"role\":\"user\",\"content\":\"" + escapeJson(userMessage) + "\"}]";
+
+        String requestBody = "{\"messages\":" + messages
+                + ",\"model\":\"" + deployment + "\""
+                + ",\"temperature\":0.1}";
+
+        String uri = "/openai/deployments/" + deployment + "/chat/completions?api-version=" + apiVersion;
+        String responseBody = restClient.post()
+                .uri(uri)
+                .body(requestBody)
+                .retrieve()
+                .body(String.class);
+
+        try {
+            JsonNode root = mapper.readTree(responseBody);
+            JsonNode choices = root.path("choices");
+            if (choices.isArray() && choices.size() > 0) {
+                return choices.get(0).path("message").path("content").asText();
+            }
+            return null;
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to parse Azure OpenAI response: " + e.getMessage(), e);
+        }
+    }
+
+    private String buildRequestBody(String userMessage, List<ToolDefinition> tools, String systemPrompt) {
+        String messages = "[{\"role\":\"system\",\"content\":\"" + escapeJson(systemPrompt) + "\"},"
                 + "{\"role\":\"user\",\"content\":\"" + escapeJson(userMessage) + "\"}]";
 
         StringBuilder toolsJson = new StringBuilder("[");

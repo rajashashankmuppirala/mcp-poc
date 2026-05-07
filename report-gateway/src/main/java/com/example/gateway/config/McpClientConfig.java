@@ -9,21 +9,47 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.time.Duration;
+import java.util.Map;
 
 @Configuration
 public class McpClientConfig {
 
-    @Value("${mcp.client.server-url:http://localhost:8081}")
-    private String serverUrl;
+    @Value("${mcp.client.request-timeout:60s}")
+    private String requestTimeout;
+
+    @Value("${mcp.client.initialization-timeout:30s}")
+    private String initializationTimeout;
 
     @Bean(destroyMethod = "closeGracefully")
-    public McpAsyncClient mcpAsyncClient() {
-        // Streamable HTTP transport — single endpoint, stateless, simpler than SSE
+    public McpAsyncClient reportsMcpClient(
+            @Value("${mcp.client.servers.reports.url:http://localhost:8081}") String serverUrl) {
+        return createClient("reports", serverUrl);
+    }
+
+    @Bean(destroyMethod = "closeGracefully")
+    public McpAsyncClient opsMcpClient(
+            @Value("${mcp.client.servers.ops.url:http://localhost:8083}") String serverUrl) {
+        return createClient("ops", serverUrl);
+    }
+
+    private McpAsyncClient createClient(String name, String serverUrl) {
         var transport = HttpClientStreamableHttpTransport.builder(serverUrl).build();
         return McpClient.async(transport)
-                .clientInfo(new McpSchema.Implementation("report-gateway-client", "1.0.0"))
-                .requestTimeout(Duration.ofSeconds(60))
-                .initializationTimeout(Duration.ofSeconds(30))
+                .clientInfo(new McpSchema.Implementation("report-gateway-client-" + name, "1.0.0"))
+                .requestTimeout(Duration.parse("PT" + requestTimeout.toUpperCase().replace("S", "S")))
+                .initializationTimeout(Duration.parse("PT" + initializationTimeout.toUpperCase().replace("S", "S")))
                 .build();
+    }
+
+    /**
+     * Expose all MCP clients as a map for dynamic routing.
+     */
+    @Bean
+    public Map<String, McpAsyncClient> mcpClientMap(McpAsyncClient reportsMcpClient,
+                                                    McpAsyncClient opsMcpClient) {
+        return Map.of(
+                "reports", reportsMcpClient,
+                "ops", opsMcpClient
+        );
     }
 }

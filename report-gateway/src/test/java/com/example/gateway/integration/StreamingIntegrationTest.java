@@ -3,10 +3,7 @@ package com.example.gateway.integration;
 import com.example.gateway.controller.AiController;
 import com.example.gateway.model.ToolDefinition;
 import com.example.gateway.model.ToolCall;
-import com.example.gateway.service.LlmProvider;
-import com.example.gateway.service.McpClientService;
-import com.example.gateway.service.PromptInjectionDetector;
-import com.example.gateway.service.ToolCallValidator;
+import com.example.gateway.service.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,10 +28,14 @@ class StreamingIntegrationTest {
     private final ToolCallValidator validator = mock(ToolCallValidator.class);
     private final McpClientService mcpClient = mock(McpClientService.class);
     private final PromptInjectionDetector injectionDetector = mock(PromptInjectionDetector.class);
+    private final SkillRegistry skillRegistry = mock(SkillRegistry.class);
+    private final AuditLogger auditLogger = mock(AuditLogger.class);
+    private final ChartGenerationService chartService = mock(ChartGenerationService.class);
     private final String fallbackMessage = "Sorry, I cannot help with this request.";
 
     private final WebTestClient webTestClient = WebTestClient
-            .bindToController(new AiController(llmProvider, validator, mcpClient, injectionDetector, fallbackMessage))
+            .bindToController(new AiController(llmProvider, validator, mcpClient, injectionDetector,
+                    skillRegistry, auditLogger, chartService, fallbackMessage))
             .build();
 
     private final ObjectMapper mapper = new ObjectMapper();
@@ -53,6 +54,7 @@ class StreamingIntegrationTest {
         when(mcpClient.getDiscoveredTools()).thenReturn(List.of(
                 new ToolDefinition("generate_report", "Generate a structured report", params)
         ));
+        when(skillRegistry.matchSkill(anyString())).thenReturn(null);
     }
 
     @Test
@@ -61,7 +63,7 @@ class StreamingIntegrationTest {
                 mapper.createObjectNode()
                         .put("reportType", "revenue")
                         .put("region", "us-east"));
-        when(llmProvider.generateToolCall(anyString(), any())).thenReturn(mockToolCall);
+        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(mockToolCall);
         when(llmProvider.providerName()).thenReturn("mock");
 
         when(mcpClient.executeToolCall(any(), anyString(), any()))
@@ -86,7 +88,7 @@ class StreamingIntegrationTest {
     @Test
     void shouldRejectInvalidToolCall() {
         ToolCall invalidToolCall = new ToolCall("unknown_tool", mapper.createObjectNode());
-        when(llmProvider.generateToolCall(anyString(), any())).thenReturn(invalidToolCall);
+        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(invalidToolCall);
         when(llmProvider.providerName()).thenReturn("mock");
         doThrow(new IllegalArgumentException("Unknown tool: unknown_tool")).when(validator).validate(any());
 
@@ -117,7 +119,7 @@ class StreamingIntegrationTest {
 
     @Test
     void shouldHandleLlmError() {
-        when(llmProvider.generateToolCall(anyString(), any()))
+        when(llmProvider.generateToolCall(anyString(), any(), any()))
                 .thenThrow(new IllegalStateException("LLM returned natural language"));
 
         webTestClient.post()
@@ -138,7 +140,7 @@ class StreamingIntegrationTest {
                         .put("region", "us-east")
                         .put("startDate", "2026-01-01")
                         .put("endDate", "2026-03-31"));
-        when(llmProvider.generateToolCall(anyString(), any())).thenReturn(mockToolCall);
+        when(llmProvider.generateToolCall(anyString(), any(), any())).thenReturn(mockToolCall);
         when(llmProvider.providerName()).thenReturn("mock");
         when(mcpClient.executeToolCall(any(), anyString(), any())).thenReturn(Flux.just("test"));
 

@@ -14,18 +14,20 @@ spring:
           filters:
             - RewritePath=/, /index.html
 
-  # Spring AI MCP Client — Streamable HTTP transport to MCP Server
-  ai:
-    mcp:
-      client:
-        name: "report-gateway-client"
-        version: "1.0.0"
-        request-timeout: 60s
-        protocol: streamable
-        streamable:
-          connections:
-            mcp-server:
-              url: ${MCP_SERVER_URL:http://localhost:8081}
+# MCP Client connections — multiple servers
+mcp:
+  client:
+    servers:
+      reports:
+        url: ${MCP_SERVER_URL:http://localhost:8081}
+        name: "Reports MCP Server"
+        skills: [report_analyst]
+      ops:
+        url: ${OPS_MCP_SERVER_URL:http://localhost:8083}
+        name: "Operations MCP Server"
+        skills: [operations_monitor]
+    request-timeout: 60s
+    initialization-timeout: 30s
 
 # LLM Provider configuration
 llm:
@@ -37,7 +39,12 @@ llm:
     deployment: ${AZURE_OPENAI_DEPLOYMENT:gpt-4o-mini}
     api-version: "2024-06-01"
 
+# Skills configuration — directory of Markdown files with frontmatter
+skills:
+  config-dir: classpath:skills/*.md
+
 logging:
   level:
     com.example.gateway: DEBUG
     org.springframework.ai: DEBUG
+    AUDIT: INFO

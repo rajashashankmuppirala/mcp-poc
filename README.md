@@ -1,17 +1,23 @@
 # Report Generator — MCP POC
 
-A natural language report generation system using the Model Context Protocol (MCP) with Streamable HTTP transport.
+A natural language report generation system using the Model Context Protocol (MCP) with Streamable HTTP transport, multi-server routing, and a skills-based multi-agent system.
 
 ## Quick Start
 
 ```bash
+# Build all modules
+mvn clean package -DskipTests
+
 # Terminal 1: Domain API
 java -jar domain-api/target/domain-api-0.0.1-SNAPSHOT.jar --server.port=8082
 
-# Terminal 2: MCP Server
+# Terminal 2: Reports MCP Server
 java -jar mcp-server/target/mcp-server-0.0.1-SNAPSHOT.jar --server.port=8081
 
-# Terminal 3: Gateway
+# Terminal 3: Operations MCP Server
+java -jar ops-mcp-server/target/ops-mcp-server-0.0.1-SNAPSHOT.jar --server.port=8083
+
+# Terminal 4: Gateway
 java -jar report-gateway/target/report-gateway-0.0.1-SNAPSHOT.jar --server.port=8080
 
 # Browser: http://localhost:8080
@@ -20,28 +26,86 @@ java -jar report-gateway/target/report-gateway-0.0.1-SNAPSHOT.jar --server.port=
 Or with Docker Compose:
 
 ```bash
-docker compose up
+docker compose up --build
 ```
 
 ## System Overview
 
 ```
-Browser (chat UI) → Gateway (:8080) → LLM → MCP Client → MCP Server (:8081) → Domain API (:8082)
+Browser (chat UI) → Gateway (:8080) → LLM → MCP Client → ┬─→ Reports MCP Server (:8081) → Domain API (:8082)
+                                                            └─→ Ops MCP Server (:8083)
 ```
 
-Three services, each with a distinct responsibility:
+Four services, each with a distinct responsibility:
 
 | Service | Port | Role |
 |---------|------|------|
-| **report-gateway** | 8080 | AI Gateway + MCP Client. Converts natural language to tool calls, orchestrates execution, streams results back to browser |
-| **mcp-server** | 8081 | MCP Server. Exposes `@McpTool` annotated methods that call the Domain API |
+| **report-gateway** | 8080 | AI Gateway + MCP Client. Converts natural language to tool calls, matches skills, orchestrates multi-server execution, streams results |
+| **mcp-server** | 8081 | Reports MCP Server. Exposes `generate_report` tool that calls the Domain API |
+| **ops-mcp-server** | 8083 | Operations MCP Server. Exposes `list_failed_jobs` and `list_successful_dataflows` tools |
 | **domain-api** | 8082 | Domain API. Generates report data and streams rows as NDJSON |
 
 The gateway has a **dual role**:
-- **Control plane**: Receives user prompts, calls the LLM to resolve them into structured tool calls
-- **Data plane**: Acts as an MCP Client, invoking tools on the MCP Server via Streamable HTTP
+- **Control plane**: Receives user prompts, matches skills, calls the LLM to resolve them into structured tool calls
+- **Data plane**: Acts as an MCP Client, invoking tools on multiple MCP Servers via Streamable HTTP with automatic tool-to-server routing
 
 For detailed architecture diagrams, see [ARCHITECTURE_V2.md](ARCHITECTURE_V2.md).
+
+---
+
+## Skills System (Multi-Agent)
+
+The gateway implements a **skills-based routing system** that narrows the LLM's tool context per request:
+
+| Skill | Triggers | MCP Server | Allowed Tools |
+|-------|----------|------------|---------------|
+| `report_analyst` | report, revenue, sales, analytics, dashboard | reports | `generate_report` |
+| `operations_monitor` | job, failed, failure, dataflow, pipeline, status | ops | `list_failed_jobs`, `list_successful_dataflows` |
+| `chart_builder` | chart, graph, plot, visualize, bar chart, line chart, pie chart | reports | `generate_report`, `list_failed_jobs`, `list_successful_dataflows` |
+
+### How Skills Work
+
+1. **Markdown files** — Each skill is a `.md` file in `src/main/resources/skills/` with YAML frontmatter for metadata and a markdown body for the agent system prompt
+2. **Keyword matching** — `SkillRegistry` scans the prompt for trigger keywords from frontmatter (<10ms match)
+3. **Tool scoping** — When a skill matches, only its `allowed_tools` are sent to the LLM, reducing attention dilution
+4. **System prompt injection** — The markdown body becomes the LLM's system prompt for behavioral guidance
+
+### Skill File Example
+
+```markdown
+---
+name: report_analyst
+description: Generate and analyze business reports
+mcp_server: reports
+triggers: [report, revenue, sales, analytics, dashboard, summary]
+allowed_tools: [generate_report]
+---
+
+# Report Analyst
+
+You are a business report analyst specializing in revenue,
+sales, and analytics data.
+
+When the user asks for a report:
+1. Identify the report type from their request
+2. Extract region if mentioned
+3. Use date ranges if provided
+```
+
+### Example Flows
+
+```
+"Show me revenue report" → report_analyst skill → {generate_report} → reports MCP server
+"Show me failed jobs" → operations_monitor skill → {list_failed_jobs, list_successful_dataflows} → ops MCP server
+"What is the weather?" → no skill match → all tools → fallback message
+```
+
+### Why Markdown Skills?
+
+- **Industry standard**: Same pattern used by Claude Code skills, GitHub Copilot Skills, and Cursor Rules
+- **Rich instructions**: Full markdown body as system prompt — multi-paragraph instructions, examples, constraints
+- **Independent files**: Add/remove skills without touching shared config — different teams can own different skills
+- **Git-friendly**: Each skill is its own file with clean diffs and ownership
 
 ---
 
@@ -73,17 +137,24 @@ The `PromptInjectionDetector` scans the prompt for injection patterns:
 - Instruction overrides (`"ignore previous"`, `"disregard"`)
 - System impersonation (`"system prompt"`, `"you are now"`)
 - Role changes (`"pretend you are"`, `"role: developer"`)
-- Suspicious characters (``` ````, `<<`, `>>`)
+- Suspicious characters (```` ``` ```, `<<`, `>>`)
 - Length limit: 4000 characters
 
 If any pattern matches, returns `400 PROMPT_INJECTION`.
 
-#### Step 4: Gateway → LLM (Natural Language → ToolCall)
+#### Step 4: Gateway — Skill Matching
+
+The `SkillRegistry` matches the prompt against skill triggers:
+- If matched → filter tools to skill's `allowed_tools`, attach skill's `systemPrompt`
+- If no match → use all discovered tools, no system prompt
+
+#### Step 5: Gateway → LLM (Natural Language → ToolCall)
 
 ```java
 ToolCall toolCall = llmProvider.generateToolCall(
     "Show me revenue for us-east from January to March",
-    List.of(ToolDefinition.generate_report())
+    List.of(ToolDefinition.generate_report()),
+    "You are a business report analyst..."  // skill system prompt
 );
 ```
 
@@ -101,7 +172,7 @@ ToolCall toolCall = llmProvider.generateToolCall(
 }
 ```
 
-#### Step 5: Gateway — Security Layer 3 (Tool Call Validation)
+#### Step 6: Gateway — Security Layer 3 (Tool Call Validation)
 
 The `ToolCallValidator` checks:
 - Tool name is in the allowlist (`generate_report` ✓)
@@ -111,9 +182,9 @@ The `ToolCallValidator` checks:
 
 If validation fails, returns `400 INVALID_TOOL_CALL`.
 
-#### Step 6: Gateway → MCP Server (Streamable HTTP with user token)
+#### Step 7: Gateway → MCP Server (Auto-Routed)
 
-The `McpClientService` injects the user token into the tool arguments and POSTs:
+The `McpClientService` looks up which server owns the tool, then POSTs:
 
 ```http
 POST /mcp
@@ -138,49 +209,40 @@ Mcp-Session-Id: a69f8bf6-...
 }
 ```
 
-#### Step 7: MCP Server — Security Layer 4 (Input Sanitization + Auth Forwarding)
-
-The `@McpTool` method sanitizes inputs and forwards the auth token:
-
-```java
-// ReportTools — sanitize all string inputs
-private String sanitize(String input, String defaultVal) {
-    if (input == null || input.isBlank()) return defaultVal;
-    return input.replaceAll("[^a-zA-Z0-9_-]", "");
-}
-```
-
-Then calls the Domain API with Bearer auth:
-
-```http
-POST /api/v1/reports/stream
-Content-Type: application/json
-Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
-X-Correlation-ID: <uuid>
-
-{
-  "reportType": "revenue",
-  "region": "us-east",
-  "dateRange": { "start": "2026-01-01", "end": "2026-03-31" },
-  "filters": { "region": "us-east" }
-}
-```
-
-**Auth fallback**: If no `X-User-Token` header was provided, the MCP Server falls back to a configured service account token (`domain-api.auth-token` in `application.yml`).
-
-#### Step 8: Domain API Streams Report Data
+#### Step 8: MCP Server → Domain API Streams Report Data
 
 ```json
 {"type":"header","data":{"reportType":"revenue","generatedAt":"2026-01-15"}}
 {"type":"data","data":{"row":1,"product":"Widget A","revenue":15000}}
-{"type":"data","data":{"row":2,"product":"Widget B","revenue":23000}}
 ...
 {"type":"footer","data":{"totalRows":50,"totalRevenue":1250000}}
 ```
 
 #### Step 9: MCP Server → MCP Client → Gateway → Browser
 
-Same SSE streaming as described in the original flow.
+SSE events stream back to the browser for progressive rendering.
+
+---
+
+## Operations Queries
+
+### Example: "Show me failed jobs in the last 24 hours"
+
+The same flow applies, but with different skill routing:
+
+1. `SkillRegistry` matches `operations_monitor` (trigger: "failed jobs")
+2. LLM sees only `{list_failed_jobs, list_successful_dataflows}` — not `generate_report`
+3. LLM returns `ToolCall(tool="list_failed_jobs", params={hours: 24})`
+4. `McpClientService` auto-routes to `ops-mcp-server` on port 8083
+5. Ops server returns tabular JSON of failed jobs
+
+### Example: "Show me successful dataflows in the last 7 days"
+
+Same skill match, different tool:
+
+1. LLM returns `ToolCall(tool="list_successful_dataflows", params={days: 7})`
+2. Auto-routed to `ops-mcp-server`
+3. Returns dataflow records with source, destination, rows processed, duration
 
 ---
 
@@ -189,37 +251,6 @@ Same SSE streaming as described in the original flow.
 ### Example: "Download revenue report"
 
 The download flow differs at the browser level — the backend flow is identical (same security layers, same auth).
-
-#### Step 1: Browser Detects "download" Keyword
-
-```javascript
-var isDownload = text.toLowerCase().indexOf('download') !== -1;
-```
-
-If true, it calls `sendAsDownload()` instead of `sendAsStream()`.
-
-#### Step 2: Gateway Generates Filename
-
-```
-generate_report-1778036884627.csv
-```
-
-Prepended as the first SSE event.
-
-#### Step 3: Browser Collects Full Response, Creates Blob, Triggers Download
-
-```javascript
-var events = parseSSE(rawText);
-var filename = events[0];  // "generate_report-1778036884627.csv"
-var content = events.slice(1).join('\n');
-var blob = new Blob([content], { type: 'text/csv' });
-var a = document.createElement('a');
-a.href = URL.createObjectURL(blob);
-a.download = filename;
-a.click();
-```
-
-### Normal vs Download Mode Comparison
 
 | Aspect | Normal Mode | Download Mode |
 |--------|-------------|---------------|
@@ -231,50 +262,80 @@ a.click();
 
 ---
 
+## Custom Chart Generation
+
+When a user asks for a chart, graph, or visualization, the gateway runs a **two-phase pipeline**:
+
+### Example: "Show me a bar chart of revenue by region"
+
+Chart requests use a **dedicated JSON endpoint** (`POST /ai/chart`) — no SSE framing since the Vega-Lite spec is produced as a single response.
+
+```
+POST /ai/chart
+{"prompt": "Show me a bar chart of revenue by region"}
+
+→ chart_builder skill matched
+→ Phase 1: LLM plans data query → ToolCall(generate_report, {reportType: "revenue"})
+→ Phase 2a: MCP executes tool → collects NDJSON data
+→ Phase 2b: LLM generates Vega-Lite JSON spec
+→ 200 application/json
+{
+  "chartType": "bar",
+  "title": "Revenue by Region",
+  "vegaLiteSpec": { "$schema": "...", "mark": "bar", ... },
+  "dataSummary": "..."
+}
+```
+
+| Phase | Component | Action |
+|-------|-----------|--------|
+| **1. Plan** | `ChartGenerationService.planDataQuery()` | LLM decides which data tool to call and with what params |
+| **2a. Fetch** | `McpClientService.executeToolCall()` | Execute the planned tool, collect NDJSON data into single string |
+| **2b. Render** | `ChartGenerationService.generateChartSpec()` | LLM creates Vega-Lite JSON spec from the data |
+| **3. Return** | `POST /ai/chart` | Return `200 application/json` — browser passes spec to `vega-embed` |
+
+**Why a dedicated endpoint?** Chart specs are complete units — no incremental streaming needed. JSON avoids SSE parsing overhead and makes the endpoint independently testable.
+
+### Supported Chart Types
+
+| Chart Type | Trigger Keywords | Data Source |
+|------------|-----------------|-------------|
+| Bar chart | "bar chart", "breakdown", "by region" | `generate_report`, `list_failed_jobs`, `list_successful_dataflows` |
+| Line chart | "line chart", "trend", "over time" | Same as above |
+| Pie chart | "pie chart", "proportion", "distribution" | Same as above |
+
+---
+
 ## Security Architecture
 
 ### Defense-in-Depth Layers
 
 ```
 Layer 1: RequestLoggingWebFilter     → Rate limiting (per IP, 60 req/min)
-Layer 2: AiController                → Prompt injection detection
-Layer 3: ToolCallValidator           → Tool allowlist + parameter regex validation
-Layer 4: ReportStreamService (MCP)   → Input sanitization + auth token forwarding
+Layer 2: PromptInjectionDetector     → LLM prompt injection detection
+Layer 3: Skill scoping               → Tool allowlist per skill domain
+Layer 4: ToolCallValidator           → Tool allowlist + parameter regex validation
+Layer 5: MCP Server input sanitize   → Input sanitization + auth token forwarding
+Layer 6: AuditLogger                 → All requests logged with correlation IDs
 ```
 
 | Layer | Component | What It Blocks | Response on Violation |
 |-------|-----------|----------------|----------------------|
 | 1 | `RequestLoggingWebFilter` | Rate abuse (DoS) | `429 Too Many Requests` |
 | 2 | `PromptInjectionDetector` | LLM prompt injection | `400 PROMPT_INJECTION` |
-| 3 | `ToolCallValidator` | Unknown tools, bad params | `400 INVALID_TOOL_CALL` |
-| 4 | `ReportTools.sanitize()` | Injection through MCP params | Strips non-alphanumeric chars |
+| 3 | `SkillRegistry` | Cross-domain tool access | Skill-scoped tool subset |
+| 4 | `ToolCallValidator` | Unknown tools, bad params | `400 INVALID_TOOL_CALL` |
+| 5 | `OpsTools.sanitize()` / `ReportTools.sanitize()` | Injection through MCP params | Strips non-alphanumeric chars |
+| 6 | `AuditLogger` | N/A (observability) | Audit trail for compliance |
 
-### Prompt Injection Detection Details
+### Audit Logging
 
-Blocked patterns:
-
-| Category | Patterns |
-|----------|----------|
-| Instruction overrides | `"ignore previous"`, `"disregard previous"`, `"forget all"` |
-| System impersonation | `"system prompt"`, `"system instruction"`, `"you are now"` |
-| Role changes | `"pretend you are"`, `"role: system"`, `"role: developer"` |
-| Output manipulation | `"output only"`, `"don't follow"`, `"bypass"`, `"override"` |
-| Tool injection | `"call tool"`, `"invoke tool"`, `"execute tool"` |
-| Suspicious chars | ` ``` `, `<<`, `>>`, `{%`, `%}` |
-| Length limit | Max 4000 characters |
-
-### Tool Call Validation Details
-
-```java
-ALLOWED_TOOLS = Set.of("generate_report")
-
-PARAM_PATTERNS = Map.of(
-    "reportType", Pattern.compile("^[a-zA-Z_]+$"),
-    "startDate",    Pattern.compile("^\\d{4}-\\d{2}-\\d{2}$"),
-    "endDate",      Pattern.compile("^\\d{4}-\\d{2}-\\d{2}$"),
-    "region",       Pattern.compile("^[a-z]+-[a-z]+$")
-)
-```
+Every request is logged with:
+- Correlation ID (UUID)
+- Event type (REQUEST, TOOL_CALL, ERROR)
+- Skill matched
+- Tools available count
+- No sensitive data (prompts, tokens, or parameters are excluded)
 
 ---
 
@@ -301,65 +362,6 @@ Gateway → MCP Server (tools/call with _userToken in arguments)
 MCP Server → Domain API (Authorization: Bearer <token>)
 ```
 
-### Configuration
-
-```yaml
-# mcp-server application.yml
-domain-api:
-  url: ${DOMAIN_API_URL:http://localhost:8082}
-  auth-token: ${DOMAIN_API_TOKEN:dummy-oauth-token-for-poc}  # POC default token
-```
-
-For production: replace `dummy-oauth-token-for-poc` with a real OAuth2 client credentials token or service account JWT.
-
----
-
-## Tool Parameter Mapping
-
-### How the LLM Maps Natural Language to Parameters
-
-The `generate_report` tool defines its parameters via `@McpToolParam` annotations. These generate a JSON schema the LLM uses:
-
-```json
-{
-  "name": "generate_report",
-  "description": "Generate a structured report from domain data",
-  "inputSchema": {
-    "type": "object",
-    "properties": {
-      "reportType": { "type": "string", "description": "Type of report" },
-      "startDate": { "type": "string", "description": "Start date YYYY-MM-DD" },
-      "endDate": { "type": "string", "description": "End date YYYY-MM-DD" },
-      "region": { "type": "string", "description": "Region filter" }
-    },
-    "required": ["reportType"]
-  }
-}
-```
-
-| User Prompt | Resolved Parameters |
-|-------------|-------------------|
-| "Show me revenue" | `{reportType: "revenue"}` |
-| "Revenue for us-east" | `{reportType: "revenue", region: "us-east"}` |
-| "Revenue from Jan to Mar" | `{reportType: "revenue", startDate: "2026-01-01", endDate: "2026-03-31"}` |
-| "All orders for eu-west last quarter" | `{reportType: "orders", region: "eu-west", startDate: "2025-10-01", endDate: "2025-12-31"}` |
-
-### What Happens When the LLM Maps Incorrectly
-
-1. **Unknown tool name** → `INVALID_TOOL_CALL`
-2. **Invalid parameter format** (bad date, special chars) → `INVALID_TOOL_CALL`
-3. **Semantically wrong value** (e.g., `reportType: "holidays"`) → Caught by regex pattern
-
----
-
-## Adding New Domain Endpoints
-
-To add a new report type:
-
-1. **Domain API**: Add a new handler in `ReportStreamController`
-2. **MCP Server**: No changes needed — `generate_report` forwards all params to Domain API
-3. **Gateway**: Update `ToolCallValidator` regex to include the new `reportType` value
-
 ---
 
 ## Project Structure
@@ -368,23 +370,37 @@ To add a new report type:
 mcp-poc/
 ├── report-gateway/          # Spring Cloud Gateway + MCP Client
 │   └── src/main/java/com/example/gateway/
-│       ├── controller/AiController.java        # WebFlux SSE, injection check, auth extraction
-│       ├── config/McpClientConfig.java         # Streamable HTTP transport
-│       ├── service/McpClientService.java       # MCP tool execution, token forwarding
-│       ├── service/MockLlmProvider.java        # NL → ToolCall (mock)
-│       ├── service/ToolCallValidator.java      # Tool allowlist + regex validation
+│       ├── controller/AiController.java        # WebFlux SSE (/ai/request), chart JSON (/ai/chart)
+│       ├── config/McpClientConfig.java         # Multi-server MCP client beans
+│       ├── config/ToolDiscoveryInitializer.java # Tool discovery + server routing map
+│       ├── service/McpClientService.java       # Multi-server tool execution, auto-routing
+│       ├── service/SkillRegistry.java           # Markdown file scanning, frontmatter parsing
+│       ├── service/MockLlmProvider.java         # NL → ToolCall (mock, skill-aware)
+│       ├── service/ToolCallValidator.java       # Tool allowlist + regex validation
 │       ├── service/PromptInjectionDetector.java # Injection pattern detection
-│       ├── filter/RequestLoggingWebFilter.java # Rate limiting + correlation IDs
-│       └── static/index.html                   # Chat UI
-├── mcp-server/              # Spring AI MCP Server
+│       ├── service/AuditLogger.java             # Audit trail with correlation IDs
+│       ├── service/ChartGenerationService.java  # Two-phase chart planning + Vega-Lite generation
+│       ├── filter/RequestLoggingWebFilter.java  # Rate limiting + correlation IDs
+│       ├── model/SkillDefinition.java           # Skill record (name, triggers, tools)
+│       ├── model/ChartResponse.java             # Chart response record (vegaLiteSpec)
+│       └── static/index.html                    # Chat UI
+│   └── src/main/resources/skills/
+│       ├── report_analyst.md                    # Business report agent skill
+│       ├── operations_monitor.md                # Operations monitoring agent skill
+│       └── chart_builder.md                     # Chart visualization agent skill
+├── mcp-server/              # Reports MCP Server
 │   └── src/main/java/com/example/mcp/
-│       ├── tool/ReportTools.java               # @McpTool + input sanitization
-│       └── service/ReportStreamService.java    # WebClient → Domain API with Bearer auth
+│       ├── tool/ReportTools.java                # @McpTool generate_report
+│       └── service/ReportStreamService.java     # WebClient → Domain API
+├── ops-mcp-server/          # Operations MCP Server
+│   └── src/main/java/com/example/ops/
+│       ├── tool/OpsTools.java                   # @McpTool list_failed_jobs, list_successful_dataflows
+│       └── service/OpsDataService.java          # Simulated ops data generation
 ├── domain-api/              # Spring Boot Domain API
 │   └── src/main/java/com/example/domain/
 │       └── controller/ReportStreamController.java  # NDJSON streaming
 ├── ARCHITECTURE_V2.md       # Detailed architecture with Mermaid diagrams
-└── docker-compose.yml       # All three services
+└── docker-compose.yml       # All four services
 ```
 
 ## Technology Stack
@@ -394,6 +410,8 @@ mcp-poc/
 | Gateway | Spring Cloud Gateway 2025.1.1 (WebFlux) |
 | MCP Client | `io.modelcontextprotocol.sdk:mcp:0.17.0` (Streamable HTTP) |
 | MCP Server | Spring AI MCP Server 1.1.5 (`protocol: STREAMABLE`) |
+| Skills | Markdown files with YAML frontmatter (industry standard pattern) |
+| Charts | Two-phase LLM pipeline → Vega-Lite JSON spec → client-side rendering |
 | Domain API | Spring Boot 4.0.0 (WebMVC) |
 | Runtime | Java 21 |
 

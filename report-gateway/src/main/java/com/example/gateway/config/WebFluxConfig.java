@@ -7,9 +7,6 @@ import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.RouterFunctions;
 import org.springframework.web.reactive.function.server.ServerResponse;
 
-/**
- * WebFlux configuration for serving static HTML and resources.
- */
 @Configuration
 public class WebFluxConfig {
 

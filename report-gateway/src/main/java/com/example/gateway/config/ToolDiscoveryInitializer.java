@@ -9,8 +9,7 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 
 /**
- * Discovers tools from the MCP server at startup and registers them
- * with the validator and LLM provider pipeline.
+ * Discovers tools from all MCP servers at startup and populates the validator allowlist.
  */
 @Component
 public class ToolDiscoveryInitializer implements ApplicationRunner {
@@ -27,12 +26,15 @@ public class ToolDiscoveryInitializer implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
-        log.info("Discovering tools from MCP server...");
-        mcpClientService.discoverAndCacheTools()
-                .subscribe(tools -> {
-                    // Update validator allowlist
-                    validator.updateAllowedTools(
-                            tools.stream().map(t -> t.name()).collect(java.util.stream.Collectors.toSet()));
-                });
+        log.info("Starting tool discovery from all MCP servers...");
+        mcpClientService.discoverAndCacheTools().block();
+
+        var tools = mcpClientService.getDiscoveredTools();
+        validator.updateAllowedTools(
+                tools.stream().map(com.example.gateway.model.ToolDefinition::name)
+                        .collect(java.util.stream.Collectors.toSet()));
+
+        log.info("Tool discovery complete. Allowlist: {}",
+                tools.stream().map(com.example.gateway.model.ToolDefinition::name).toList());
     }
 }

@@ -1,19 +1,18 @@
 package com.example.gateway.controller;
 
 import com.example.gateway.model.AiRequest;
+import com.example.gateway.model.ChartResponse;
+import com.example.gateway.model.SkillDefinition;
 import com.example.gateway.model.ToolCall;
 import com.example.gateway.model.ToolDefinition;
-import com.example.gateway.service.LlmProvider;
-import com.example.gateway.service.McpClientService;
-import com.example.gateway.service.PromptInjectionDetector;
-import com.example.gateway.service.ToolCallValidator;
+import com.example.gateway.service.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
@@ -21,6 +20,7 @@ import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -40,15 +40,28 @@ public class AiController {
     private final ToolCallValidator validator;
     private final McpClientService mcpClient;
     private final PromptInjectionDetector injectionDetector;
+    private final SkillRegistry skillRegistry;
+    private final AuditLogger auditLogger;
+    private final ChartGenerationService chartService;
     private final String fallbackMessage;
 
-    public AiController(LlmProvider llmProvider, ToolCallValidator validator,
-                        McpClientService mcpClient, PromptInjectionDetector injectionDetector,
+    private static final Set<String> CHART_SKILLS = Set.of("chart_builder");
+
+    public AiController(LlmProvider llmProvider,
+                        ToolCallValidator validator,
+                        McpClientService mcpClient,
+                        PromptInjectionDetector injectionDetector,
+                        SkillRegistry skillRegistry,
+                        AuditLogger auditLogger,
+                        ChartGenerationService chartService,
                         @Value("${llm.fallback-message:Sorry, I cannot help with this request.}") String fallbackMessage) {
         this.llmProvider = llmProvider;
         this.validator = validator;
         this.mcpClient = mcpClient;
         this.injectionDetector = injectionDetector;
+        this.skillRegistry = skillRegistry;
+        this.auditLogger = auditLogger;
+        this.chartService = chartService;
         this.fallbackMessage = fallbackMessage;
     }
 
@@ -60,21 +73,39 @@ public class AiController {
         // Layer 1: Prompt injection check
         injectionDetector.check(request.prompt());
 
-        // Resolve tools dynamically from MCP server (discovered at startup)
-        List<ToolDefinition> tools = mcpClient.getDiscoveredTools();
-        if (tools.isEmpty()) {
-            log.warn("[{}] No tools discovered from MCP server", correlationId);
-            return Flux.error(new IllegalStateException("No tools available from MCP server"));
+        // Layer 2: Skill matching
+        SkillDefinition matchedSkill = skillRegistry.matchSkill(request.prompt());
+        String skillName = matchedSkill != null ? matchedSkill.name() : "none";
+        log.info("[{}] Matched skill: {}{}", correlationId, skillName,
+                matchedSkill != null ? " (server=" + matchedSkill.mcpServer() + ")" : "");
+
+        // Resolve tools: if skill matched, filter to skill's allowed tools
+        List<ToolDefinition> tools;
+        if (matchedSkill != null && !matchedSkill.allowedTools().isEmpty()) {
+            tools = mcpClient.getDiscoveredTools().stream()
+                    .filter(t -> matchedSkill.allowedTools().contains(t.name()))
+                    .toList();
+            log.info("[{}] Skill-scoped tools: {} (filtered from {})", correlationId,
+                    tools.size(), mcpClient.getDiscoveredTools().size());
+        } else {
+            tools = mcpClient.getDiscoveredTools();
         }
+
+        if (tools.isEmpty()) {
+            log.warn("[{}] No tools available for request", correlationId);
+            return Flux.error(new NoToolMatchException(fallbackMessage));
+        }
+
+        String systemPrompt = matchedSkill != null ? matchedSkill.systemPrompt() : null;
 
         // Extract auth token from request header for downstream propagation
         String userToken = exchange.getRequest().getHeaders().getFirst("X-User-Token");
 
         boolean isDownload = request.prompt().toLowerCase().contains("download");
 
-        // Step 1: Call LLM provider to convert prompt → tool call
+        // Step 1: Call LLM provider with skill system prompt
         Mono<ToolCall> toolCallMono = Mono.fromCallable(() -> {
-            ToolCall toolCall = llmProvider.generateToolCall(request.prompt(), tools);
+            ToolCall toolCall = llmProvider.generateToolCall(request.prompt(), tools, systemPrompt);
             if (toolCall == null) {
                 log.info("[{}] LLM ({}) returned null — prompt does not match any tool", correlationId, llmProvider.providerName());
                 throw new NoToolMatchException(fallbackMessage);
@@ -104,6 +135,14 @@ public class AiController {
                     }
                 });
 
+        // Audit log
+        rowStream = rowStream.doOnSubscribe(s ->
+                auditLogger.log(correlationId, "REQUEST", Map.of(
+                        "skill", skillName,
+                        "tools_available", tools.size()
+                ))
+        );
+
         // For download mode, prepend a metadata line with the filename
         if (isDownload) {
             final String filename = "generate_report-" + System.currentTimeMillis() + ".csv";
@@ -111,6 +150,52 @@ public class AiController {
         }
 
         return rowStream;
+    }
+
+    /**
+     * Dedicated chart endpoint — returns JSON, not SSE.
+     * Two-phase: LLM plans data query → fetch data → LLM generates Vega-Lite spec.
+     */
+    @PostMapping(value = "/chart", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Mono<ChartResponse> handleChartRequest(@RequestBody AiRequest request, ServerWebExchange exchange) {
+        String correlationId = UUID.randomUUID().toString();
+        log.info("[{}] Chart request: {}", correlationId, request.prompt());
+
+        // Layer 1: Prompt injection check
+        injectionDetector.check(request.prompt());
+
+        // Layer 2: Match chart_builder skill
+        SkillDefinition skill = skillRegistry.matchSkill(request.prompt());
+        if (skill == null || !CHART_SKILLS.contains(skill.name())) {
+            log.info("[{}] No chart skill matched", correlationId);
+            return Mono.error(new NoToolMatchException(fallbackMessage));
+        }
+
+        List<ToolDefinition> tools = mcpClient.getDiscoveredTools().stream()
+                .filter(t -> skill.allowedTools().contains(t.name()))
+                .toList();
+
+        String systemPrompt = skill.systemPrompt();
+        String userToken = exchange.getRequest().getHeaders().getFirst("X-User-Token");
+
+        // Phase 1: LLM plans which data tool to call
+        return Mono.fromCallable(() -> {
+                    ToolCall tc = chartService.planDataQuery(request.prompt(), tools, systemPrompt);
+                    if (tc == null) throw new NoToolMatchException(fallbackMessage);
+                    return tc;
+                })
+                .doOnNext(tc -> { validator.validate(tc); })
+                // Phase 2a: Execute tool → collect raw data rows into single string
+                .flatMap(tc -> mcpClient.executeToolCall(tc, correlationId, userToken)
+                        .collectList()
+                        .map(rows -> String.join("\n", rows)))
+                // Phase 2b: LLM generates Vega-Lite spec from the data
+                .map(rawData -> chartService.generateChartSpec(
+                        request.prompt(), rawData, null, systemPrompt))
+                .doOnSuccess(resp -> auditLogger.log(correlationId, "CHART_REQUEST", Map.of(
+                        "skill", skill.name(),
+                        "chartType", resp.chartType()
+                )));
     }
 
     @GetMapping("/status")
@@ -127,6 +212,21 @@ public class AiController {
                         "description", t.description()
                 )).toList(),
                 "count", tools.size()
+        );
+    }
+
+    @GetMapping("/skills")
+    public Map<String, Object> listSkills() {
+        List<SkillDefinition> skills = skillRegistry.getAllSkills();
+        return Map.of(
+                "skills", skills.stream().map(s -> Map.of(
+                        "name", s.name(),
+                        "description", s.description(),
+                        "triggers", s.triggers(),
+                        "mcp_server", s.mcpServer(),
+                        "allowed_tools", s.allowedTools()
+                )).toList(),
+                "count", skills.size()
         );
     }
 
