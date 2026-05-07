@@ -187,8 +187,12 @@ public class AiController {
                         .collectList()
                         .map(rows -> String.join("\n", rows)))
                 // Phase 2b: LLM generates Vega-Lite spec from the data
-                .flatMap(rawData -> chartService.generateChartSpec(
-                        request.prompt(), rawData, null, systemPrompt))
+                .flatMap(rawData -> {
+                    String chartType = ChartGenerationService.detectChartType(request.prompt());
+                    log.info("[{}] Detected chart type: {}", correlationId, chartType);
+                    return chartService.generateChartSpec(
+                            request.prompt(), rawData, chartType, systemPrompt);
+                })
                 .doOnSuccess(resp -> auditLogger.log(correlationId, "CHART_REQUEST", Map.of(
                         "skill", skill.name(),
                         "chartType", resp.chartType()

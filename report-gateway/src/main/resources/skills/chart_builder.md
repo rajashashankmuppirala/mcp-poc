@@ -11,6 +11,8 @@ triggers:
   - bar chart
   - line chart
   - pie chart
+  - area chart
+  - scatter plot
   - dashboard
   - breakdown
 allowed_tools:
@@ -41,10 +43,19 @@ When calling `generate_report`, extract these parameters:
   - If no date mentioned, use {default_start} to {default_end}
 
 ## Phase 2: Chart Spec Generation
-After receiving data, output a Vega-Lite JSON specification:
-- **Bar charts**: For categorical comparisons (revenue by region, sales by product)
-- **Line charts**: For time series (trends over time)
-- **Pie charts**: For proportions/distributions
-- **Tables**: For raw tabular data
+After receiving data, output a Vega-Lite JSON specification appropriate for the requested chart type:
+
+| Chart Type | When to Use | Vega-Lite Mark |
+|-----------|-------------|----------------|
+| Bar | Comparing categories (revenue by region, sales by product) | `{"mark": "bar"}` |
+| Line | Time series, trends over time | `{"mark": "line"}` with `"points": true` |
+| Pie / Donut | Proportions, distributions, market share | `{"mark": {"type": "arc", "innerRadius": 0}}` (pie) or `50` (donut) |
+| Area | Volume over time, cumulative trends | `{"mark": "area"}` with `"interpolate": "monotone"` |
+| Scatter | Correlations, relationships between two numeric fields | `{"mark": "point"}` |
+
+Encoding rules:
+- **Categorical fields** → `{"type": "nominal"}`, channel: x or color
+- **Numeric fields** → `{"type": "quantitative"}`, channel: y, theta, or size
+- **Time/date fields** → `{"type": "temporal"}`, channel: x with `timeUnit: "yearmonthdatehoursminutes"`
 
 Output ONLY valid JSON — no markdown, no backticks, no explanations.
