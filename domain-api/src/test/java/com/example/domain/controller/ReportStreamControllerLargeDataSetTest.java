@@ -21,7 +21,6 @@ class ReportStreamControllerLargeDataSetTest {
 
     @Test
     void shouldStream100PlusRowsIncrementally() throws Exception {
-        // Arrange
         ReportStreamController.ReportQuery query = new ReportStreamController.ReportQuery(
                 "revenue",
                 new ReportStreamController.ReportQuery.DateRange("2026-01-01", "2026-12-31"),
@@ -30,22 +29,19 @@ class ReportStreamControllerLargeDataSetTest {
                 150
         );
 
-        // Act
         StreamingResponseBody stream = controller.streamReport(query);
 
-        // Assert: Capture streaming output
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         stream.writeTo(baos);
 
         String output = baos.toString();
         String[] lines = output.split("\n");
 
-        // Verify row count
         int rowCount = 0;
         for (String line : lines) {
             if (!line.trim().isEmpty()) {
                 rowCount++;
-                assertTrue(line.startsWith("row"), "Each line should start with 'row': " + line);
+                assertTrue(line.startsWith("{"), "Each line should be JSON: " + line);
             }
         }
 

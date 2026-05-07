@@ -12,7 +12,14 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.YearMonth;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.TemporalAdjusters;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -181,9 +188,60 @@ public class SkillRegistry {
                 values.get("description"),
                 listValues.getOrDefault("triggers", List.of()),
                 values.get("mcp_server"),
-                body,
+                resolvePlaceholders(body),
                 listValues.getOrDefault("allowed_tools", List.of())
         );
+    }
+
+    /**
+     * Resolve dynamic date placeholders in the skill system prompt.
+     * Placeholders are evaluated at load time using the current date:
+     *   {current_year}      → 2026
+     *   {current_date}      → 2026-04-08
+     *   {current_quarter}   → Q2
+     *   {last_year_start}   → 2025-01-01
+     *   {last_year_end}     → 2025-12-31
+     *   {current_year_start}→ 2026-01-01
+     *   {current_year_end}  → 2026-12-31
+     *   {last_quarter_start}→ 2026-01-01
+     *   {last_quarter_end}  → 2026-03-31
+     *   {this_quarter_start}→ 2026-04-01
+     *   {this_quarter_end}  → 2026-06-30
+     *   {default_start}     → {last_year_start} (start of last calendar year)
+     *   {default_end}       → {current_date} (today)
+     */
+    private String resolvePlaceholders(String text) {
+        LocalDate today = LocalDate.now();
+        int currentYear = today.getYear();
+        int lastYear = currentYear - 1;
+        int currentQuarter = (today.getMonthValue() - 1) / 3 + 1;
+        int lastQuarter = currentQuarter == 1 ? 4 : currentQuarter - 1;
+        int lastQuarterYear = currentQuarter == 1 ? lastYear : currentYear;
+
+        Map<String, String> replacements = new LinkedHashMap<>();
+        replacements.put("{current_year}", String.valueOf(currentYear));
+        replacements.put("{current_date}", today.format(DateTimeFormatter.ISO_LOCAL_DATE));
+        replacements.put("{current_quarter}", "Q" + currentQuarter);
+        replacements.put("{last_year_start}", lastYear + "-01-01");
+        replacements.put("{last_year_end}", lastYear + "-12-31");
+        replacements.put("{current_year_start}", currentYear + "-01-01");
+        replacements.put("{current_year_end}", currentYear + "-12-31");
+        replacements.put("{last_quarter_start}", YearMonth.of(lastQuarterYear, lastQuarter)
+                .atDay(1).format(DateTimeFormatter.ISO_LOCAL_DATE));
+        replacements.put("{last_quarter_end}", YearMonth.of(lastQuarterYear, lastQuarter)
+                .atEndOfMonth().format(DateTimeFormatter.ISO_LOCAL_DATE));
+        replacements.put("{this_quarter_start}", YearMonth.of(currentYear, currentQuarter)
+                .atDay(1).format(DateTimeFormatter.ISO_LOCAL_DATE));
+        replacements.put("{this_quarter_end}", YearMonth.of(currentYear, currentQuarter)
+                .atEndOfMonth().format(DateTimeFormatter.ISO_LOCAL_DATE));
+        replacements.put("{default_start}", (currentYear - 1) + "-01-01");
+        replacements.put("{default_end}", today.format(DateTimeFormatter.ISO_LOCAL_DATE));
+
+        // Order matters: longer keys first to avoid partial replacements
+        for (Map.Entry<String, String> entry : replacements.entrySet()) {
+            text = text.replace(entry.getKey(), entry.getValue());
+        }
+        return text;
     }
 
     /**

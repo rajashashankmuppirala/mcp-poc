@@ -15,7 +15,7 @@ class ReportExportControllerTest {
 
     @Test
     void exportReport_shouldReturnStreamingBody() {
-        var response = controller.exportReport();
+        var response = controller.exportReport("revenue", "2025-01-01", "2026-04-30", null);
         assertNotNull(response);
         assertEquals(200, response.getStatusCode().value());
         assertNotNull(response.getBody());
