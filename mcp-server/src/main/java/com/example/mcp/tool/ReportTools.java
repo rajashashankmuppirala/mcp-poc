@@ -27,10 +27,10 @@ public class ReportTools {
 
     @McpTool(description = "Generate a structured report from domain data. Returns rows as newline-delimited text.")
     public List<String> generate_report(
-            @McpToolParam(description = "Type of report (e.g., revenue, sales, inventory)", required = true) String reportType,
-            @McpToolParam(description = "Start date in YYYY-MM-DD format", required = false) String startDate,
-            @McpToolParam(description = "End date in YYYY-MM-DD format", required = false) String endDate,
-            @McpToolParam(description = "Region filter (e.g., us-east, eu-west)", required = false) String region,
+            @McpToolParam(description = "Type of report: revenue, sales, orders, inventory, customers, expenses, profit, or subscriptions", required = true) String reportType,
+            @McpToolParam(description = "Start date in YYYY-MM-DD format. e.g., 'this year' means Jan 1 of current year to Dec 31 of current year", required = true) String startDate,
+            @McpToolParam(description = "End date in YYYY-MM-DD format. e.g., 'this year' means Jan 1 of current year to Dec 31 of current year", required = true) String endDate,
+            @McpToolParam(description = "Region filter: us-east, us-west, eu-west, eu-central, apac, or latam. Omit for all regions.", required = false) String region,
             @McpToolParam(description = "User OAuth token for domain API auth", required = false) String _userToken
     ) {
         String correlationId = java.util.UUID.randomUUID().toString();

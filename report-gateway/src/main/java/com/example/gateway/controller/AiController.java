@@ -152,9 +152,10 @@ public class AiController {
     /**
      * Dedicated chart endpoint — returns JSON, not SSE.
      * Two-phase: LLM plans data query → fetch data → LLM generates Vega-Lite spec.
+     * If chart type is ambiguous, returns a clarification response for user to pick.
      */
     @PostMapping(value = "/chart", produces = MediaType.APPLICATION_JSON_VALUE)
-    public Mono<ChartResponse> handleChartRequest(@RequestBody AiRequest request, ServerWebExchange exchange) {
+    public Mono<Object> handleChartRequest(@RequestBody AiRequest request, ServerWebExchange exchange) {
         String correlationId = UUID.randomUUID().toString();
         log.info("[{}] Chart request: {}", correlationId, request.prompt());
 
@@ -166,6 +167,14 @@ public class AiController {
         if (skill == null || !CHART_SKILLS.contains(skill.name())) {
             log.info("[{}] No chart skill matched", correlationId);
             return Mono.error(new NoToolMatchException(fallbackMessage));
+        }
+
+        // Detect chart type — if ambiguous, ask user to clarify
+        String detectedType = ChartGenerationService.detectChartType(request.prompt());
+        boolean isAmbiguous = !ChartGenerationService.isChartTypeExplicit(request.prompt());
+        if (isAmbiguous) {
+            log.info("[{}] Chart type ambiguous, asking for clarification", correlationId);
+            return Mono.just(ChartGenerationService.chartTypeClarification(request.prompt()));
         }
 
         List<ToolDefinition> tools = mcpClient.getDiscoveredTools().stream()
@@ -188,14 +197,14 @@ public class AiController {
                         .map(rows -> String.join("\n", rows)))
                 // Phase 2b: LLM generates Vega-Lite spec from the data
                 .flatMap(rawData -> {
-                    String chartType = ChartGenerationService.detectChartType(request.prompt());
-                    log.info("[{}] Detected chart type: {}", correlationId, chartType);
+                    log.info("[{}] Detected chart type: {}", correlationId, detectedType);
                     return chartService.generateChartSpec(
-                            request.prompt(), rawData, chartType, systemPrompt);
+                            request.prompt(), rawData, detectedType, systemPrompt);
                 })
+                .cast(Object.class)
                 .doOnSuccess(resp -> auditLogger.log(correlationId, "CHART_REQUEST", Map.of(
                         "skill", skill.name(),
-                        "chartType", resp.chartType()
+                        "chartType", resp instanceof ChartResponse c ? c.chartType() : "unknown"
                 )));
     }
 

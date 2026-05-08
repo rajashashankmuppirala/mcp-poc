@@ -1,6 +1,7 @@
-package com.example.mcp.tool;
+package com.example.mcp.controller;
 
 import com.example.mcp.service.ReportStreamService;
+import com.example.mcp.tool.ReportTools;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;

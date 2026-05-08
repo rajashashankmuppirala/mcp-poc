@@ -1,6 +1,7 @@
 package com.example.gateway.service;
 
 import com.example.gateway.model.ChartResponse;
+import com.example.gateway.model.ClarificationResponse;
 import com.example.gateway.model.ToolCall;
 import com.example.gateway.model.ToolDefinition;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -9,6 +10,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
+import java.time.LocalDate;
+import java.time.YearMonth;
 import java.util.List;
 import java.util.Map;
 
@@ -36,6 +39,16 @@ public class ChartGenerationService {
     public static String detectChartType(String userMessage) {
         if (userMessage == null) return "bar";
         String lower = userMessage.toLowerCase();
+        // Check explicit chart type prefix first (e.g., "Chart type: bar.")
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("chart type:\\s*(\\w+)").matcher(lower);
+        if (m.find()) {
+            String type = m.group(1);
+            if ("pie".equals(type)) return "pie";
+            if ("line".equals(type)) return "line";
+            if ("area".equals(type)) return "area";
+            if ("scatter".equals(type)) return "scatter";
+            if ("bar".equals(type)) return "bar";
+        }
         if (lower.contains("pie chart") || lower.contains("pie graph")) return "pie";
         if (lower.contains("line chart") || lower.contains("line graph") || lower.contains("trend")) return "line";
         if (lower.contains("area chart") || lower.contains("area graph")) return "area";
@@ -45,16 +58,85 @@ public class ChartGenerationService {
     }
 
     /**
+     * Check if the user explicitly mentioned a chart type.
+     * Returns false when the prompt is ambiguous (just "chart" without type).
+     */
+    public static boolean isChartTypeExplicit(String userMessage) {
+        if (userMessage == null) return false;
+        String lower = userMessage.toLowerCase();
+        // Recognize explicit chart type prefix from clarification flow
+        if (lower.startsWith("chart type:")) return true;
+        return lower.contains("pie chart") || lower.contains("pie graph")
+                || lower.contains("line chart") || lower.contains("line graph") || lower.contains("trend")
+                || lower.contains("area chart") || lower.contains("area graph")
+                || lower.contains("scatter") || lower.contains("correlation")
+                || lower.contains("bar chart") || lower.contains("bar graph") || lower.contains("histogram");
+    }
+
+    /**
+     * Build a clarification response when chart type is ambiguous.
+     */
+    public static ClarificationResponse chartTypeClarification(String originalPrompt) {
+        return new ClarificationResponse(
+                "chart_type",
+                "What type of chart would you like?",
+                List.of(
+                        new ClarificationResponse.Option("Bar", "bar", "Compare values across categories"),
+                        new ClarificationResponse.Option("Line", "line", "Show trends over time"),
+                        new ClarificationResponse.Option("Pie", "pie", "Show proportions or distribution"),
+                        new ClarificationResponse.Option("Area", "area", "Show volume over time"),
+                        new ClarificationResponse.Option("Scatter", "scatter", "Show correlation between values")
+                ),
+                "Specify the chart type and I'll generate it for you.",
+                originalPrompt
+        );
+    }
+
+    /**
      * Phase 1: Ask the LLM to plan — which tool to call.
      */
     public Mono<ToolCall> planDataQuery(String userMessage, List<ToolDefinition> tools, String systemPrompt) {
-        String planningPrompt = userMessage + "\n\n"
-                + "Respond with ONLY a tool call. Choose the best tool for fetching the data needed "
-                + "to create the requested visualization. Include relevant parameters.";
+        // Resolve date mappings at runtime so LLM has concrete values
+        LocalDate today = LocalDate.now();
+        int cy = today.getYear();
+        int ly = cy - 1;
+        int cq = (today.getMonthValue() - 1) / 3 + 1;
+        int lq = cq == 1 ? 4 : cq - 1;
+        int lqy = cq == 1 ? ly : cy;
+        String thisQuarterStart = YearMonth.of(cy, cq).atDay(1).toString();
+        String thisQuarterEnd = YearMonth.of(cy, cq).atEndOfMonth().toString();
+        String lastQuarterStart = YearMonth.of(lqy, lq).atDay(1).toString();
+        String lastQuarterEnd = YearMonth.of(lqy, lq).atEndOfMonth().toString();
+
+        String dateContext = String.format(
+                "IMPORTANT — Use these exact date ranges when the user mentions relative dates:\n"
+                + "- \"this year\" → startDate: \"%d-01-01\", endDate: \"%d-12-31\"\n"
+                + "- \"last year\" → startDate: \"%d-01-01\", endDate: \"%d-12-31\"\n"
+                + "- \"this quarter\" / \"Q%d\" → startDate: \"%s\", endDate: \"%s\"\n"
+                + "- \"last quarter\" → startDate: \"%s\", endDate: \"%s\"\n"
+                + "- today → \"%s\"\n",
+                cy, cy, ly, ly, cq, thisQuarterStart, thisQuarterEnd, lastQuarterStart, lastQuarterEnd, today);
+
+        String planningPrompt = dateContext + "\n"
+                + "User request: " + userMessage + "\n\n"
+                + "You MUST call a tool with ALL applicable parameters.\n"
+                + "If the user mentions a time period, you MUST provide startDate AND endDate.\n"
+                + "If the user mentions a region, you MUST provide region.\n"
+                + "Respond with ONLY a tool call — no explanation, no natural language.";
+
+        log.info("=== CHART PLAN PROMPT ===");
+        log.info("userMessage: {}", userMessage);
+        log.info("systemPrompt length: {}", systemPrompt != null ? systemPrompt.length() : 0);
+        if (systemPrompt != null && systemPrompt.length() < 2000) {
+            log.info("systemPrompt: {}", systemPrompt);
+        }
 
         return llmProvider.generateToolCall(planningPrompt, tools, systemPrompt)
                 .doOnNext(tc -> {
                     log.info("Chart plan: tool={} params={}", tc.tool(), tc.parameters());
+                    if (tc != null) {
+                        log.info("Chart plan params detail: {}", tc.parameters().toPrettyString());
+                    }
                 })
                 .doOnNext(tc -> {
                     if (tc == null) log.warn("LLM returned null for chart planning prompt");

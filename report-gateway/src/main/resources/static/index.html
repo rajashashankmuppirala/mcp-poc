@@ -66,7 +66,7 @@
 (function() {
   'use strict';
 
-  var chartEmbedKeywords = ['bar chart', 'line chart', 'pie chart', 'chart of', 'graph of', 'plot of', 'visualize', 'visualization', 'breakdown', 'dashboard'];
+  var chartEmbedKeywords = ['bar chart', 'line chart', 'pie chart', 'area chart', 'scatter plot', 'chart of', 'a chart', 'the chart', 'create chart', 'create a chart', 'generate chart', 'graph of', 'plot of', 'visualize', 'visualization', 'breakdown', 'dashboard'];
 
   var chatEl = document.getElementById('chat');
   var promptEl = document.getElementById('prompt');
@@ -217,50 +217,14 @@
         return;
       }
       return response.json().then(function(data) {
-        ui.pre.remove();
-        ui.cursor.remove();
-
-        // Create chart container
-        var chartDiv = createEl('div', 'chart-container', ui.bubble);
-        chartDiv.id = 'chart-' + Date.now();
-
-        // Parse the vegaLiteSpec string into a JS object
-        var spec;
-        try {
-          spec = typeof data.vegaLiteSpec === 'string'
-            ? JSON.parse(data.vegaLiteSpec)
-            : data.vegaLiteSpec;
-        } catch (e) {
-          ui.pre.textContent = 'Invalid chart spec: ' + e.message;
-          ui.pre.textContent += '\n\nRaw: ' + data.vegaLiteSpec;
-          sendBtn.disabled = false;
+        // Check if this is a clarification request
+        if (data.type === 'chart_type' && data.options) {
+          ui.pre.remove();
+          ui.cursor.remove();
+          showClarificationDialog(ui, data, text);
           return;
         }
-
-        // Load vega-embed dynamically if not yet loaded
-        loadVegaScripts().then(function() {
-          var opts = {
-            renderer: 'canvas',
-            actions: { export: true, source: false, compiled: false, editor: false }
-          };
-
-          vegaEmbed(chartDiv, spec, opts).then(function() {
-            var meta = createEl('div', 'meta', ui.msg);
-            meta.textContent = data.title + ' (' + data.chartType + ')';
-            sendBtn.disabled = false;
-            promptEl.focus();
-            chatEl.scrollTop = chatEl.scrollHeight;
-          }).catch(function(err) {
-            ui.pre.textContent = 'Chart render error: ' + err.message;
-            ui.pre.textContent += '\n\nSpec preview:\n' + JSON.stringify(spec, null, 2);
-            sendBtn.disabled = false;
-          });
-        }).catch(function(err) {
-          // CDN failed — show raw spec as fallback
-          ui.pre.textContent = 'Could not load chart renderer.';
-          ui.pre.textContent += '\n\nChart spec:\n' + JSON.stringify(spec, null, 2);
-          sendBtn.disabled = false;
-        });
+        renderChart(ui, data, sendBtn);
       });
     }).catch(function(err) {
       ui.pre.textContent = 'Connection error: ' + err.message;
@@ -268,6 +232,114 @@
       sendBtn.disabled = false;
       promptEl.focus();
     });
+  }
+
+  // Render a Vega-Lite chart spec in the UI
+  function renderChart(ui, data, sendBtn) {
+    ui.pre.remove();
+    ui.cursor.remove();
+
+    var chartDiv = createEl('div', 'chart-container', ui.bubble);
+    chartDiv.id = 'chart-' + Date.now();
+
+    var spec;
+    try {
+      spec = typeof data.vegaLiteSpec === 'string'
+        ? JSON.parse(data.vegaLiteSpec)
+        : data.vegaLiteSpec;
+    } catch (e) {
+      ui.pre.textContent = 'Invalid chart spec: ' + e.message;
+      sendBtn.disabled = false;
+      return;
+    }
+
+    loadVegaScripts().then(function() {
+      var opts = {
+        renderer: 'canvas',
+        actions: { export: true, source: false, compiled: false, editor: false }
+      };
+
+      vegaEmbed(chartDiv, spec, opts).then(function() {
+        var meta = createEl('div', 'meta', ui.msg);
+        meta.textContent = data.title + ' (' + data.chartType + ')';
+        sendBtn.disabled = false;
+        promptEl.focus();
+        chatEl.scrollTop = chatEl.scrollHeight;
+      }).catch(function(err) {
+        ui.pre.textContent = 'Chart render error: ' + err.message;
+        sendBtn.disabled = false;
+      });
+    }).catch(function(err) {
+      ui.pre.textContent = 'Could not load chart renderer.';
+      sendBtn.disabled = false;
+    });
+  }
+
+  // Show interactive chart type selector when user prompt is ambiguous
+  function showClarificationDialog(ui, data, originalPrompt) {
+    var question = createEl('div', '', ui.bubble);
+    question.style.fontWeight = '600';
+    question.style.marginBottom = '12px';
+    question.textContent = data.question;
+
+    var optionsDiv = createEl('div', '', ui.bubble);
+    optionsDiv.style.display = 'flex';
+    optionsDiv.style.gap = '8px';
+    optionsDiv.style.flexWrap = 'wrap';
+    optionsDiv.style.marginBottom = '8px';
+
+    for (var i = 0; i < data.options.length; i++) {
+      (function(opt) {
+        var btn = document.createElement('button');
+        btn.textContent = opt.label;
+        btn.style.cssText = 'padding: 8px 16px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; font-size: 13px; transition: all 0.15s;';
+        btn.onmouseover = function() { btn.style.borderColor = 'var(--accent)'; btn.style.background = '#0c4a6e'; };
+        btn.onmouseout = function() { btn.style.borderColor = 'var(--border)'; btn.style.background = 'var(--surface)'; };
+        btn.onclick = function() {
+          // Disable all buttons
+          var allBtns = optionsDiv.querySelectorAll('button');
+          for (var j = 0; j < allBtns.length; j++) {
+            allBtns[j].disabled = true;
+            allBtns[j].style.opacity = '0.4';
+          }
+          btn.style.opacity = '1';
+          btn.style.borderColor = 'var(--accent)';
+          btn.style.background = '#0c4a6e';
+
+          // Add user selection as a message
+          addUserMessage(opt.label + ' chart');
+
+          // Resend with chart type prefix, preserving original prompt filters
+          var newPrompt = 'Chart type: ' + opt.value + '. ' + originalPrompt;
+          var newUi = addBotMessage();
+          newUi.pre.textContent = 'Generating ' + opt.label + ' chart...';
+
+          fetch('/ai/chart', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt: newPrompt })
+          }).then(function(resp) {
+            if (!resp.ok) {
+              return resp.json().then(function(err) {
+                newUi.pre.textContent = 'Error ' + resp.status + ': ' + (err.message || err.error || resp.statusText);
+                newUi.cursor.remove();
+              });
+              return;
+            }
+            return resp.json().then(function(data) { renderChart(newUi, data, sendBtn); });
+          }).catch(function(err) {
+            newUi.pre.textContent = 'Connection error: ' + err.message;
+            sendBtn.disabled = false;
+          });
+        };
+        optionsDiv.appendChild(btn);
+      })(data.options[i]);
+    }
+
+    if (data.context) {
+      var ctx = createEl('div', 'meta', ui.msg);
+      ctx.textContent = data.context;
+    }
   }
 
   // Display mode: parse SSE events and render progressively
