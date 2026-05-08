@@ -327,6 +327,61 @@ POST /ai/chart
 
 ---
 
+## Conversational Memory
+
+The system maintains conversation context across multiple turns using an externalized session store. This enables follow-up requests that reference previous context without restating all parameters.
+
+### How It Works
+
+```
+Turn 1: "Show me revenue for last year"
+         → LLM sees: [current request]
+         → Extracts: reportType=revenue, startDate=2025-01-01, endDate=2025-12-31
+         → Session saved with Turn 1
+
+Turn 2: "Show it as a pie chart"
+         → ContextInjector prepends history:
+           "=== Conversation History ===
+            User: Show me revenue for last year
+            [Filters: reportType=revenue, startDate=2025-01-01, endDate=2025-12-31]
+            === Current Request ===
+            User: Show it as a pie chart"
+         → LLM inherits revenue + 2025 dates, changes chart type only
+         → Pie chart rendered with same data
+```
+
+### Session Management
+
+| Feature | Implementation |
+|---------|----------------|
+| **Session ID** | UUID from cookie (`session-id`) or header (`X-Session-ID`) |
+| **Storage** | Redis (production) or in-memory (dev) — both implement `SessionStore` interface |
+| **TTL** | 30 minutes (configurable) |
+| **Max Turns** | 100 per session (then summarization) |
+| **Statelessness** | Gateway remains stateless — sessions externalized |
+
+### Session Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /session/history` | Full conversation history with extracted filters |
+| `POST /session/clear` | Delete session and all history |
+| `GET /session/status` | Session status (active, turn count, expiry) |
+
+### Context Injection
+
+The `ContextInjector` builds prompts with:
+- **Date reference**: Maps "last year", "this quarter" to actual dates
+- **Sliding window**: Last 8 conversation turns
+- **Filter inheritance**: Previous parameters available for reference resolution
+
+Example pronoun resolution:
+- "Show **it** as a pie chart" → "it" resolves to previous `reportType`
+- "What about **Europe**?" → inherits `reportType`, changes `region`
+- "**Same thing** for last month" → inherits all filters, changes dates
+
+---
+
 ## LLM Integration
 
 The gateway uses a pluggable `LlmProvider` interface to convert natural language prompts into structured tool calls. Two providers ship with the project:
@@ -464,7 +519,10 @@ mcp-poc/
 ├── report-gateway/          # Spring Cloud Gateway + MCP Client
 │   └── src/main/java/com/example/gateway/
 │       ├── controller/AiController.java        # WebFlux SSE (/ai/request), chart JSON (/ai/chart)
+│       ├── controller/ConversationController.java # Session management endpoints (/session/*)
 │       ├── config/McpClientConfig.java         # Multi-server MCP client beans
+│       ├── config/RedisConfig.java              # Redis session store configuration
+│       ├── config/SessionConfig.java            # Session timeout and storage settings
 │       ├── config/ToolDiscoveryInitializer.java # Tool discovery + skill validation against servers
 │       ├── service/McpClientService.java       # Multi-server tool execution, auto-routing
 │       ├── service/SkillRegistry.java           # Markdown skills + server capability validation
@@ -475,10 +533,19 @@ mcp-poc/
 │       ├── service/PromptInjectionDetector.java # Injection pattern detection
 │       ├── service/AuditLogger.java             # Audit trail with correlation IDs
 │       ├── service/ChartGenerationService.java  # Two-phase chart planning + Vega-Lite generation
+│       ├── service/ConversationService.java     # Session lifecycle management
+│       ├── service/ContextInjector.java         # Context prompt building with history
+│       ├── service/SessionStore.java            # Interface for session persistence
+│       ├── service/RedisSessionStore.java       # Redis-based session storage
+│       ├── service/InMemorySessionStore.java    # In-memory session storage (dev)
 │       ├── filter/RequestLoggingWebFilter.java  # Rate limiting + correlation IDs
 │       ├── model/SkillDefinition.java           # Skill record (name, triggers, tools)
 │       ├── model/ChartResponse.java             # Chart response record (vegaLiteSpec)
-│       └── static/index.html                    # Chat UI
+│       ├── model/ConversationSession.java       # Session with turns, userId, timestamps
+│       ├── model/ConversationTurn.java          # Single turn (prompt, filters, response)
+│       ├── model/ExtractedFilters.java          # Structured parameters from tool calls
+│       ├── model/SessionContext.java            # Wrapper for session + ID
+│       └── static/index.html                    # Chat UI with session support
 │   └── src/main/resources/skills/
 │       ├── report_analyst.md                    # Business report agent skill
 │       ├── operations_monitor.md                # Operations monitoring agent skill
@@ -512,6 +579,7 @@ mcp-poc/
 | Skills | Markdown files with YAML frontmatter (industry standard pattern) |
 | LLM | Pluggable `LlmProvider` interface — mock or any OpenAI-compatible endpoint |
 | Charts | Two-phase LLM pipeline → Vega-Lite JSON spec → client-side rendering |
+| Session Storage | Redis (production) / ConcurrentHashMap (dev) — reactive Spring Data |
 | Domain API | Spring Boot 4.0.0 (WebMVC) |
 | Runtime | Java 21 |
 

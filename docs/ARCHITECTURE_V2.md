@@ -56,7 +56,8 @@ flowchart LR
     end
 
     subgraph Gateway["Gateway Layer :8080"]
-        AiCtrl["AiController\nPOST /ai/request\nGET /ai/tools\nGET /ai/skills"]
+        AiCtrl["AiController\nPOST /ai/request\nGET /ai/tools\nGET /ai/skills\nPOST /ai/chart"]
+        ConvCtrl["ConversationController\nGET /session/history\nPOST /session/clear\nGET /session/status"]
         InjDet["PromptInjectionDetector"]
         SkillReg["SkillRegistry\nmarkdown files\nkeyword matching"]
         SkillScope["Tool Scoping\nfilter by allowed_tools"]
@@ -64,6 +65,9 @@ flowchart LR
         Validator["ToolCall Validator\nallowlist + regex"]
         McpSvc["MCP Client Service\nmulti-server routing"]
         AuditLog["AuditLogger\ncorrelation ID trail"]
+        ConvSvc["ConversationService\nsession lifecycle"]
+        CtxInj["ContextInjector\nsliding window context"]
+        SessStore[(SessionStore\nRedis / In-Memory)]
     end
 
     subgraph Reports["Reports MCP Server :8081"]
@@ -82,7 +86,13 @@ flowchart LR
     end
 
     UI --> AiCtrl
+    UI --> ConvCtrl
     AiCtrl --> InjDet
+    AiCtrl --> ConvSvc
+    AiCtrl --> CtxInj
+    ConvCtrl --> ConvSvc
+    ConvSvc --> SessStore
+    CtxInj --> ConvSvc
     InjDet --> SkillReg
     SkillReg --> SkillScope
     SkillScope --> LLMProv
@@ -862,6 +872,239 @@ spring:
 
 ---
 
+## Conversational Memory System
+
+The system maintains conversation context across multiple turns using an externalized session store, enabling follow-up requests that reference previous context.
+
+### Architecture Overview
+
+```mermaid
+flowchart TD
+    subgraph Browser["Browser Layer"]
+        UI["Chat UI\nindex.html"]
+        Cookie["session-id cookie"]
+    end
+
+    subgraph Gateway["Gateway Layer :8080"]
+        AiCtrl["AiController\nPOST /ai/chart"]
+        ConvCtrl["ConversationController\nGET /session/history"]
+        CtxInj["ContextInjector\nbuildContextPrompt()"]
+        ConvSvc["ConversationService\nloadOrCreateSession()"]
+        SessionStore["SessionStore Interface"]
+    end
+
+    subgraph Storage["Session Storage"]
+        InMem[(InMemorySessionStore\nConcurrentHashMap)]
+        Redis[(RedisSessionStore\nJSON serialization)]
+    end
+
+    subgraph Models["Domain Models"]
+        Session["ConversationSession\nsessionId, userId, turns[]"]
+        Turn["ConversationTurn\nturnNumber, filters, response"]
+        Filters["ExtractedFilters\nreportType, region, dates"]
+    end
+
+    UI -->|"X-Session-ID header\nor cookie"| AiCtrl
+    UI -->|View History / Clear| ConvCtrl
+    AiCtrl -->|Extract/Inject| CtxInj
+    AiCtrl -->|Load/Save| ConvSvc
+    ConvCtrl -->|Load/Delete| ConvSvc
+    ConvSvc -->|Reactive ops| SessionStore
+    SessionStore -->|Conditional| InMem
+    SessionStore -->|Conditional| Redis
+    Turn -.->|part of| Session
+    Filters -.->|extracted from| Turn
+```
+
+### Key Components
+
+| Component | Responsibility | Implementation |
+|-----------|---------------|----------------|
+| **ConversationController** | REST endpoints for session management | `GET /session/history`, `POST /session/clear`, `GET /session/status` |
+| **ConversationService** | Session lifecycle management | Load/create sessions, save turns, clear history |
+| **ContextInjector** | Build context-aware prompts | Sliding window of recent turns + date reference |
+| **SessionStore** | Interface for session persistence | `find()`, `save()`, `delete()`, `exists()` |
+| **InMemorySessionStore** | Dev/test storage | `ConcurrentHashMap` with TTL cleanup |
+| **RedisSessionStore** | Production storage | ReactiveRedisTemplate with JSON serialization |
+| **ConversationSession** | Immutable session record | `sessionId`, `userId`, `turns[]`, `turnCount`, `MAX_TURNS=100` |
+| **ConversationTurn** | Single exchange record | `turnNumber`, `timestamp`, `userPrompt`, `extractedFilters`, `responseType`, `chartType` |
+| **ExtractedFilters** | Structured parameters | `reportType`, `region`, `startDate`, `endDate`, `additionalFilters`, `mergeWithContext()` |
+
+### Session Flow: Follow-Up Request
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as User
+    participant Browser as Browser
+    participant GW as Gateway :8080
+    participant CS as ConversationService
+    participant CI as ContextInjector
+    participant SS as SessionStore
+    participant LLM as LLM Provider
+
+    Note over User,Browser: Turn 1: Initial Request
+    User->>Browser: "Show me revenue for last year"
+    Browser->>GW: POST /ai/chart<br/>{"prompt": "..."}<br/>Cookie: session-id=abc-123
+    GW->>CS: loadOrCreateSession("abc-123")
+    CS->>SS: find("abc-123")
+    SS-->>CS: null (new session)
+    CS-->>GW: new SessionContext
+    GW->>LLM: generateToolCall(prompt, tools, systemPrompt)<br/>[no context yet]
+    LLM-->>GW: ToolCall(tool="generate_report",<br/>params={reportType:"revenue", startDate:"2025-01-01", endDate:"2025-12-31"})
+    GW->>CS: saveTurn(session, turn)
+    CS->>SS: save(session with Turn 1)
+    SS-->>CS: session persisted
+    GW-->>Browser: 200 OK<br/>X-Session-ID: abc-123<br/>ChartResponse
+    Browser-->>User: Renders bar chart
+
+    Note over User,Browser: Turn 2: Follow-Up with Context
+    User->>Browser: "Show it as a pie chart"
+    Browser->>GW: POST /ai/chart<br/>{"prompt": "Show it as a pie chart"}<br/>Cookie: session-id=abc-123
+    GW->>CS: loadOrCreateSession("abc-123")
+    CS->>SS: find("abc-123")
+    SS-->>CS: Session with Turn 1<br/>(revenue, 2025 dates)
+    GW->>CI: buildContextPrompt("Show it as a pie chart", session)
+    CI-->>GW: Context prompt with history:<br/>"=== Date Reference ===<br/>=== Conversation History ===<br/>User: Show me revenue...<br/>[Filters: reportType=revenue...]<br/>=== Current Request ===<br/>User: Show it as a pie chart"
+    GW->>LLM: generateToolCall(contextPrompt, tools, systemPrompt)
+    Note over LLM: LLM sees previous filters<br/>and inherits reportType, dates
+    LLM-->>GW: ToolCall(tool="generate_report",<br/>params={reportType:"revenue", startDate:"2025-01-01", endDate:"2025-12-31"})
+    GW->>CS: saveTurn(session, turn)
+    CS->>SS: save(session with Turn 2)
+    GW-->>Browser: 200 OK<br/>ChartResponse (pie chart)
+    Browser-->>User: Renders pie chart
+```
+
+### Context Injection
+
+The `ContextInjector` builds prompts that include conversation history:
+
+```java
+public String buildContextPrompt(String currentPrompt, ConversationSession session) {
+    StringBuilder prompt = new StringBuilder();
+
+    // Date reference section (today is 2026-05-07)
+    prompt.append("=== Date Reference (today is 2026-05-07) ===\n");
+    prompt.append("- \"this year\" → startDate: \"2026-01-01\", endDate: \"2026-12-31\"\n");
+    prompt.append("- \"last year\" → startDate: \"2025-01-01\", endDate: \"2025-12-31\"\n");
+    // ... more date mappings
+
+    // Add conversation context (sliding window: last 8 turns)
+    if (session != null && !session.isEmpty()) {
+        List<ConversationTurn> recentTurns = session.getRecentTurns(8);
+        prompt.append("\n=== Conversation History ===\n");
+        for (ConversationTurn turn : recentTurns) {
+            prompt.append("User: ").append(turn.userPrompt()).append("\n");
+            if (turn.extractedFilters() != null) {
+                prompt.append("[Filters: ").append(turn.extractedFilters()).append("]\n");
+            }
+            // ... response metadata
+        }
+    }
+
+    // Current request
+    prompt.append("=== Current Request ===\n");
+    prompt.append("User: ").append(currentPrompt).append("\n");
+
+    return prompt.toString();
+}
+```
+
+### Filter Extraction and Merge
+
+When the LLM generates a tool call, filters are extracted and can inherit from previous turns:
+
+```java
+public ExtractedFilters mergeWithContext(ExtractedFilters context) {
+    if (context == null) {
+        return this;
+    }
+    return new ExtractedFilters(
+        this.reportType != null ? this.reportType : context.reportType,
+        this.region != null ? this.region : context.region,
+        this.startDate != null ? this.startDate : context.startDate,
+        this.endDate != null ? this.endDate : context.endDate,
+        mergeAdditionalFilters(this.additionalFilters, context.additionalFilters)
+    );
+}
+```
+
+This enables pronoun resolution:
+- User: "Show me **revenue** for **last year**"
+- User: "Show **it** as a **pie chart**" → LLM sees context, inherits revenue + 2025 dates
+
+### Session Configuration
+
+```yaml
+# application.yml (report-gateway)
+session:
+  storage:
+    type: in-memory  # or "redis" for production
+  timeout-minutes: 30  # Session TTL
+
+spring:
+  data:
+    redis:
+      host: localhost
+      port: 6379
+```
+
+### Session Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/session/history` | GET | Retrieve full conversation history for session |
+| `/session/clear` | POST | Delete session and all conversation history |
+| `/session/status` | GET | Check session status (active, turn count, expiry) |
+
+### Frontend Integration
+
+The browser manages session via cookie:
+
+```javascript
+// On page load: restore session from cookie
+var sessionId = getCookie('session-id');
+
+// On each request: include session header
+fetch('/ai/chart', {
+    method: 'POST',
+    headers: {
+        'Content-Type': 'application/json',
+        'X-Session-ID': sessionId  // or from cookie
+    },
+    body: JSON.stringify({prompt: text})
+});
+
+// On response: update session ID
+var newSessionId = response.headers.get('X-Session-ID');
+if (newSessionId) {
+    setCookie('session-id', newSessionId, 1800);  // 30 min TTL
+}
+
+// History panel: load from endpoint
+document.getElementById('btn-history').onclick = function() {
+    fetch('/session/history', {
+        headers: {'X-Session-ID': sessionId}
+    }).then(r => r.json()).then(data => {
+        // Render turns in slide-out panel
+    });
+};
+```
+
+### Statelessness Guarantee
+
+The gateway remains stateless — all session data is externalized:
+
+| Aspect | Implementation |
+|--------|---------------|
+| **Session Storage** | External (Redis or in-memory, not gateway heap) |
+| **Session ID** | Client-provided (cookie or header) |
+| **Horizontal Scaling** | Multiple gateway instances share Redis session store |
+| **Restart Safety** | Sessions survive gateway restart (with Redis) |
+| **TTL Management** | Automatic expiry handled by storage layer |
+
+---
+
 ## Summary
 
 | Question | Answer |
@@ -877,3 +1120,7 @@ spring:
 | **How does data flow?** | Browser to Gateway to Skill Match to LLM to ToolCall to MCP Client to Auto-route to MCP Server to Domain API and back |
 | **Why raw MCP SDK?** | Avoids Jackson 3.x vs 2.x conflict with Spring Cloud Gateway |
 | **Why Streamable HTTP?** | SSE is deprecated in MCP spec 2025-03-26. Streamable HTTP uses a single POST endpoint |
+| **What is Conversational Memory?** | Session storage that maintains conversation history across multiple turns |
+| **How does context injection work?** | Previous turns prepended to LLM prompts with sliding window (last 8 turns) |
+| **Where are sessions stored?** | Redis for production, ConcurrentHashMap for local dev — both implement SessionStore interface |
+| **How do follow-up requests work?** | User references like "it" resolve via context — filters inherit from previous turns |
