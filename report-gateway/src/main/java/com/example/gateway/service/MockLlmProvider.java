@@ -9,7 +9,10 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
+import java.time.LocalDate;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 @ConditionalOnProperty(name = "llm.provider", havingValue = "mock")
@@ -84,21 +87,106 @@ public class MockLlmProvider implements LlmProvider {
             var params = mapper.createObjectNode();
             params.put("reportType", "revenue");
             if (region != null) params.put("region", region);
+
+            // Parse relative date phrases from the prompt
+            String[] dates = parseDates(lower);
+            if (dates != null) {
+                params.put("startDate", dates[0]);
+                params.put("endDate", dates[1]);
+            }
+
             return Mono.just(new ToolCall("generate_report", params));
         } catch (Exception e) {
             return Mono.error(new IllegalStateException("Failed to build mock tool call", e));
         }
     }
 
+    /**
+     * Parse relative date phrases from the user prompt.
+     * Returns [startDate, endDate] or null if no date phrase matched.
+     */
+    private String[] parseDates(String lower) {
+        int currentYear = LocalDate.now().getYear();
+        int currentMonth = LocalDate.now().getMonthValue();
+        int currentQuarter = (currentMonth - 1) / 3 + 1;
+
+        // Explicit ISO dates: "2025-01-01 to 2025-12-31"
+        Matcher explicitMatcher = Pattern.compile("(\\d{4}-\\d{2}-\\d{2})\\s*(?:to|until|through|\\u2013|\\u2014|-)\\s*(\\d{4}-\\d{2}-\\d{2})").matcher(lower);
+        if (explicitMatcher.find()) {
+            return new String[]{explicitMatcher.group(1), explicitMatcher.group(2)};
+        }
+
+        // "last year" / "previous year"
+        if (lower.contains("last year") || lower.contains("previous year")) {
+            int y = currentYear - 1;
+            return new String[]{y + "-01-01", y + "-12-31"};
+        }
+        // "this year" / "current year"
+        if (lower.contains("this year") || lower.contains("current year")) {
+            return new String[]{currentYear + "-01-01", currentYear + "-12-31"};
+        }
+        // "last quarter" / "previous quarter"
+        if (lower.contains("last quarter") || lower.contains("previous quarter")) {
+            int lq = currentQuarter == 1 ? 4 : currentQuarter - 1;
+            int lqy = currentQuarter == 1 ? currentYear - 1 : currentYear;
+            int startMonth = (lq - 1) * 3 + 1;
+            int endMonth = lq * 3;
+            int endDay = LocalDate.of(lqy, endMonth, 1).lengthOfMonth();
+            return new String[]{
+                    String.format("%d-%02d-01", lqy, startMonth),
+                    String.format("%d-%02d-%02d", lqy, endMonth, endDay)
+            };
+        }
+        // "this quarter" / "current quarter" / "Q1" / "Q2" etc.
+        Matcher qMatcher = Pattern.compile("(?:this|current)?\\s*(q(\\d))").matcher(lower);
+        if (qMatcher.find()) {
+            int q = Integer.parseInt(qMatcher.group(2));
+            int startMonth = (q - 1) * 3 + 1;
+            int endMonth = q * 3;
+            int endDay = LocalDate.of(currentYear, endMonth, 1).lengthOfMonth();
+            return new String[]{
+                    String.format("%d-%02d-01", currentYear, startMonth),
+                    String.format("%d-%02d-%02d", currentYear, endMonth, endDay)
+            };
+        }
+        // "last month" / "previous month"
+        if (lower.contains("last month") || lower.contains("previous month")) {
+            LocalDate lastMonth = LocalDate.now().minusMonths(1);
+            int endDay = lastMonth.lengthOfMonth();
+            return new String[]{
+                    String.format("%d-%02d-01", lastMonth.getYear(), lastMonth.getMonthValue()),
+                    String.format("%d-%02d-%02d", lastMonth.getYear(), lastMonth.getMonthValue(), endDay)
+            };
+        }
+        // "this month" / "current month"
+        if (lower.contains("this month") || lower.contains("current month")) {
+            LocalDate now = LocalDate.now();
+            return new String[]{
+                    String.format("%d-%02d-01", now.getYear(), now.getMonthValue()),
+                    String.format("%d-%02d-%02d", now.getYear(), now.getMonthValue(), now.lengthOfMonth())
+            };
+        }
+        // "past N days" / "last N days"
+        Matcher daysMatcher = Pattern.compile("(?:past|last)\\s+(\\d+)\\s+days?").matcher(lower);
+        if (daysMatcher.find()) {
+            int days = Integer.parseInt(daysMatcher.group(1));
+            LocalDate end = LocalDate.now();
+            LocalDate start = end.minusDays(days);
+            return new String[]{start.toString(), end.toString()};
+        }
+
+        return null;
+    }
+
     private int parseHours(String lower) {
         // Extract hours using word boundary matching to avoid "24" matching "4"
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+)\\s*(?:hours?|hrs?)").matcher(lower);
+        Matcher m = Pattern.compile("(\\d+)\\s*(?:hours?|hrs?)").matcher(lower);
         if (m.find()) {
             int val = Integer.parseInt(m.group(1));
             if (val >= 1 && val <= 168) return val;
         }
         // Extract days
-        m = java.util.regex.Pattern.compile("(\\d+)\\s*(?:days?)").matcher(lower);
+        m = Pattern.compile("(\\d+)\\s*(?:days?)").matcher(lower);
         if (m.find()) {
             int val = Integer.parseInt(m.group(1));
             if (val >= 1 && val <= 30) return val * 24;

@@ -1,23 +1,19 @@
 package com.example.gateway.service;
 
-import com.example.gateway.model.ChartResponse;
-import com.example.gateway.model.ClarificationResponse;
-import com.example.gateway.model.ToolCall;
-import com.example.gateway.model.ToolDefinition;
+import com.example.gateway.model.*;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
-import java.time.LocalDate;
-import java.time.YearMonth;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Two-phase chart generation:
- * Phase 1 — Plan: LLM decides which data tool to call
+ * Phase 1 — Plan: LLM decides which data tool to call (with conversation context)
  * Phase 2 — Render: LLM receives the data + chart type hint and produces a Vega-Lite JSON spec
  */
 @Service
@@ -27,10 +23,12 @@ public class ChartGenerationService {
 
     private final LlmProvider llmProvider;
     private final McpClientService mcpClient;
+    private final ContextInjector contextInjector;
 
-    public ChartGenerationService(LlmProvider llmProvider, McpClientService mcpClient) {
+    public ChartGenerationService(LlmProvider llmProvider, McpClientService mcpClient, ContextInjector contextInjector) {
         this.llmProvider = llmProvider;
         this.mcpClient = mcpClient;
+        this.contextInjector = contextInjector;
     }
 
     /**
@@ -94,53 +92,80 @@ public class ChartGenerationService {
 
     /**
      * Phase 1: Ask the LLM to plan — which tool to call.
+     * Now with conversation context injection.
      */
-    public Mono<ToolCall> planDataQuery(String userMessage, List<ToolDefinition> tools, String systemPrompt) {
-        // Resolve date mappings at runtime so LLM has concrete values
-        LocalDate today = LocalDate.now();
-        int cy = today.getYear();
-        int ly = cy - 1;
-        int cq = (today.getMonthValue() - 1) / 3 + 1;
-        int lq = cq == 1 ? 4 : cq - 1;
-        int lqy = cq == 1 ? ly : cy;
-        String thisQuarterStart = YearMonth.of(cy, cq).atDay(1).toString();
-        String thisQuarterEnd = YearMonth.of(cy, cq).atEndOfMonth().toString();
-        String lastQuarterStart = YearMonth.of(lqy, lq).atDay(1).toString();
-        String lastQuarterEnd = YearMonth.of(lqy, lq).atEndOfMonth().toString();
-
-        String dateContext = String.format(
-                "IMPORTANT — Use these exact date ranges when the user mentions relative dates:\n"
-                + "- \"this year\" → startDate: \"%d-01-01\", endDate: \"%d-12-31\"\n"
-                + "- \"last year\" → startDate: \"%d-01-01\", endDate: \"%d-12-31\"\n"
-                + "- \"this quarter\" / \"Q%d\" → startDate: \"%s\", endDate: \"%s\"\n"
-                + "- \"last quarter\" → startDate: \"%s\", endDate: \"%s\"\n"
-                + "- today → \"%s\"\n",
-                cy, cy, ly, ly, cq, thisQuarterStart, thisQuarterEnd, lastQuarterStart, lastQuarterEnd, today);
-
-        String planningPrompt = dateContext + "\n"
-                + "User request: " + userMessage + "\n\n"
+    public Mono<ToolCall> planDataQuery(String userMessage, List<ToolDefinition> tools,
+                                         String systemPrompt, ConversationSession session) {
+        // Build context-aware prompt using conversation history
+        String planningPrompt = contextInjector.buildContextPrompt(userMessage, session) + "\n"
                 + "You MUST call a tool with ALL applicable parameters.\n"
                 + "If the user mentions a time period, you MUST provide startDate AND endDate.\n"
                 + "If the user mentions a region, you MUST provide region.\n"
+                + "If the user refers to something from the conversation history (using \"it\", \"that\", \"the same\"), use the filters from that context.\n"
                 + "Respond with ONLY a tool call — no explanation, no natural language.";
 
         log.info("=== CHART PLAN PROMPT ===");
         log.info("userMessage: {}", userMessage);
-        log.info("systemPrompt length: {}", systemPrompt != null ? systemPrompt.length() : 0);
-        if (systemPrompt != null && systemPrompt.length() < 2000) {
-            log.info("systemPrompt: {}", systemPrompt);
+        log.info("session present: {}", session != null);
+        if (session != null) {
+            log.info("session turns: {}", session.turns().size());
         }
 
         return llmProvider.generateToolCall(planningPrompt, tools, systemPrompt)
                 .doOnNext(tc -> {
-                    log.info("Chart plan: tool={} params={}", tc.tool(), tc.parameters());
-                    if (tc != null) {
-                        log.info("Chart plan params detail: {}", tc.parameters().toPrettyString());
-                    }
-                })
-                .doOnNext(tc -> {
                     if (tc == null) log.warn("LLM returned null for chart planning prompt");
-                });
+                })
+                // Enforce filter inheritance from previous turn at code level
+                .map(tc -> inheritFilters(tc, session));
+    }
+
+    /**
+     * Merge previous turn's filters into the current tool call for any missing fields.
+     * This ensures context inheritance even when the LLM doesn't follow prompt instructions.
+     */
+    private ToolCall inheritFilters(ToolCall toolCall, ConversationSession session) {
+        if (toolCall == null || toolCall.parameters() == null || session == null) {
+            log.debug("inheritFilters: skipping - no toolCall or session");
+            return toolCall;
+        }
+
+        ConversationTurn lastTurn = session.getLastTurn();
+        if (lastTurn == null || lastTurn.extractedFilters() == null) {
+            log.info("inheritFilters: no previous filters to inherit (lastTurn={}, filters={})",
+                    lastTurn != null ? "present" : "null",
+                    lastTurn != null && lastTurn.extractedFilters() != null ? "present" : "null");
+            return toolCall;
+        }
+
+        ExtractedFilters currentFilters = contextInjector.extractFilters("", toolCall);
+        ExtractedFilters mergedFilters = currentFilters.mergeWithContext(lastTurn.extractedFilters());
+
+        // Only update if something actually changed
+        if (mergedFilters.equals(currentFilters)) {
+            log.info("inheritFilters: no changes needed — LLM already provided all filters");
+            return toolCall;
+        }
+
+        log.info("Inheriting filters from previous turn: previous={}, current={}, merged={}",
+                lastTurn.extractedFilters(), currentFilters, mergedFilters);
+
+        // Update the ToolCall parameters with merged filters
+        ObjectNode params = (ObjectNode) toolCall.parameters();
+        if (mergedFilters.startDate() != null && !params.has("startDate")) {
+            params.put("startDate", mergedFilters.startDate().format(DateTimeFormatter.ISO_LOCAL_DATE));
+        }
+        if (mergedFilters.endDate() != null && !params.has("endDate")) {
+            params.put("endDate", mergedFilters.endDate().format(DateTimeFormatter.ISO_LOCAL_DATE));
+        }
+        if (mergedFilters.reportType() != null && !params.has("reportType")) {
+            params.put("reportType", mergedFilters.reportType());
+        }
+        if (mergedFilters.region() != null && !params.has("region")) {
+            params.put("region", mergedFilters.region());
+        }
+
+        log.info("inheritFilters: updated tool call params with inherited dates: {}", params);
+        return new ToolCall(toolCall.tool(), params);
     }
 
     /**

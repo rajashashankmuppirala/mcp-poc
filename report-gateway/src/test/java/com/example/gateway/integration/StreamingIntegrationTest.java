@@ -1,8 +1,7 @@
 package com.example.gateway.integration;
 
 import com.example.gateway.controller.AiController;
-import com.example.gateway.model.ToolDefinition;
-import com.example.gateway.model.ToolCall;
+import com.example.gateway.model.*;
 import com.example.gateway.service.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -32,11 +31,13 @@ class StreamingIntegrationTest {
     private final SkillRegistry skillRegistry = mock(SkillRegistry.class);
     private final AuditLogger auditLogger = mock(AuditLogger.class);
     private final ChartGenerationService chartService = mock(ChartGenerationService.class);
+    private final ConversationService conversationService = mock(ConversationService.class);
+    private final ContextInjector contextInjector = mock(ContextInjector.class);
     private final String fallbackMessage = "Sorry, I cannot help with this request.";
 
     private final WebTestClient webTestClient = WebTestClient
             .bindToController(new AiController(llmProvider, validator, mcpClient, injectionDetector,
-                    skillRegistry, auditLogger, chartService, fallbackMessage))
+                    skillRegistry, auditLogger, chartService, conversationService, contextInjector, fallbackMessage))
             .build();
 
     private final ObjectMapper mapper = new ObjectMapper();
@@ -56,6 +57,31 @@ class StreamingIntegrationTest {
                 new ToolDefinition("generate_report", "Generate a structured report", params)
         ));
         when(skillRegistry.matchSkill(anyString())).thenReturn(null);
+
+        // Mock session management
+        SessionContext ctx = SessionContext.createNew();
+        when(conversationService.loadOrCreateSession(anyString())).thenReturn(Mono.just(ctx));
+        when(conversationService.saveTurn(any(), any())).thenAnswer(invocation -> {
+            SessionContext context = invocation.getArgument(0);
+            return Mono.just(context);
+        });
+
+        // Mock context injector
+        when(contextInjector.createTurn(anyString(), any(), any())).thenAnswer(invocation -> {
+            String prompt = invocation.getArgument(0);
+            ToolCall tc = invocation.getArgument(1);
+            ContextInjector.ResponseMetadata meta = invocation.getArgument(2);
+            ExtractedFilters.Builder fb = ExtractedFilters.builder();
+            if (tc != null && tc.parameters() != null) {
+                if (tc.parameters().has("reportType")) fb.reportType(tc.parameters().get("reportType").asText());
+                if (tc.parameters().has("region")) fb.region(tc.parameters().get("region").asText());
+            }
+            return ConversationTurn.builder()
+                    .userPrompt(prompt)
+                    .extractedFilters(fb.build())
+                    .responseType(meta != null ? meta.type() : "report")
+                    .build();
+        });
     }
 
     @Test
