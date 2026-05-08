@@ -406,15 +406,25 @@
     chatEl.scrollTop = chatEl.scrollHeight;
   }
 
-  // Reusable error handler: parse JSON response and show friendly message
+  // Reusable error handler: parse JSON response and show friendly message.
+  // Does NOT consume the body — caller must not call response.text()/json() after this.
   function handleErrorResponse(ui, response, defaultMsg) {
     if (!response.ok) {
-      return response.json().then(function(err) {
-        var msg = err.message || defaultMsg || 'Something went wrong. Please try again.';
+      // Parse error from JSON body if available, otherwise use default
+      var msg = defaultMsg || 'Something went wrong. Please try again.';
+      try {
+        // Clone response so we can peek at body without consuming it for callers
+        response.clone().json().then(function(err) {
+          if (err && err.message) msg = err.message;
+          showBotError(ui, response, msg);
+        }).catch(function() {
+          showBotError(ui, response, msg);
+        });
+      } catch (e) {
         showBotError(ui, response, msg);
-      }).catch(function() {
-        showBotError(ui, response, defaultMsg || 'Something went wrong. Please try again.');
-      });
+      }
+      // Return a rejected promise to stop the calling chain from continuing
+      return Promise.reject(new Error('__handled__'));
     }
     return null;
   }
@@ -640,6 +650,7 @@
       }
       return read();
     }).catch(function(err) {
+      if (err.message === '__handled__') return; // error already displayed
       showBotError(ui, null, 'The connection failed. Please check your network and try again.');
     });
   }
@@ -691,7 +702,8 @@
         chatEl.scrollTop = chatEl.scrollHeight;
       });
     }).catch(function(err) {
-      ui.pre.textContent = 'The download failed. Please try again.';
+      if (err.message === '__handled__') return; // error already displayed
+      ui.pre.textContent = 'The download failed: ' + (err.message || 'unknown error') + '. Please try again.';
       ui.cursor.remove();
       sendBtn.disabled = false;
       promptEl.focus();

@@ -134,8 +134,11 @@ public class AiController {
         boolean isDownload = request.prompt().toLowerCase().contains("download");
 
         // Load session, execute, save turn, stream response
-        return conversationService.loadOrCreateSession(sessionId)
+        return Mono.defer(() -> conversationService.loadOrCreateSession(sessionId))
                 .flatMapMany(sessionContext -> {
+                    // Set session header before any data streams
+                    addSessionHeaders(exchange, sessionContext.sessionId());
+
                     // Step 1: Call LLM provider with skill system prompt
                     Mono<ToolCall> toolCallMono = llmProvider.generateToolCall(request.prompt(), tools, systemPrompt)
                             .switchIfEmpty(Mono.defer(() -> {
@@ -161,10 +164,6 @@ public class AiController {
 
                     // Step 3: Execute via MCP client, parse JSON array, emit rows as SSE
                     Flux<String> rowStream = savedMono
-                            .doOnNext(saved -> {
-                                // Set session header before data starts streaming
-                                addSessionHeaders(exchange, saved.context().sessionId());
-                            })
                             .flatMapMany(saved -> mcpClient.executeToolCall(saved.toolCall(), correlationId, userToken)
                                     .doOnSubscribe(s ->
                                             auditLogger.log(correlationId, "REQUEST", Map.of(
