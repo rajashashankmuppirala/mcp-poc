@@ -30,11 +30,12 @@ class AiControllerTest {
     private final ChartGenerationService chartService = mock(ChartGenerationService.class);
     private final ConversationService conversationService = mock(ConversationService.class);
     private final ContextInjector contextInjector = mock(ContextInjector.class);
+    private final PromptCapabilityChecker capabilityChecker = mock(PromptCapabilityChecker.class);
     private final String fallbackMessage = "Sorry, I cannot help with this request.";
 
     private final WebTestClient webTestClient = WebTestClient
             .bindToController(new AiController(llmProvider, validator, mcpClient, injectionDetector,
-                    skillRegistry, auditLogger, chartService, conversationService, contextInjector, fallbackMessage))
+                    skillRegistry, auditLogger, chartService, conversationService, contextInjector, capabilityChecker, fallbackMessage))
             .build();
 
     @BeforeEach
@@ -73,6 +74,10 @@ class AiControllerTest {
                         .responseType("report")
                         .build()
         );
+
+        // Default: capability checker allows prompts through
+        when(capabilityChecker.checkOutOfScope(anyString())).thenReturn(null);
+        when(capabilityChecker.noToolMatchMessage(anyString())).thenReturn("I cannot help with that.");
     }
 
     @Test
@@ -156,7 +161,7 @@ class AiControllerTest {
                 .expectStatus().isBadRequest()
                 .expectBody()
                 .jsonPath("$.error").isEqualTo("NO_TOOL_MATCH")
-                .jsonPath("$.message").isEqualTo("Sorry, I cannot help with this request.");
+                .jsonPath("$.message").isEqualTo("I cannot help with that.");
     }
 
     @Test
@@ -171,6 +176,22 @@ class AiControllerTest {
                 .expectStatus().isBadRequest()
                 .expectBody()
                 .jsonPath("$.error").isEqualTo("NO_TOOL_MATCH");
+    }
+
+    @Test
+    void handleAiRequest_shouldReturnFriendlyMessageForOutOfScopePrompt() {
+        when(capabilityChecker.checkOutOfScope("What's the weather today?"))
+                .thenReturn("I'm a report generation assistant. I can't help with that.");
+
+        webTestClient.post()
+                .uri("/ai/request")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"prompt\": \"What's the weather today?\"}")
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody()
+                .jsonPath("$.error").isEqualTo("OUT_OF_SCOPE")
+                .jsonPath("$.message").isEqualTo("I'm a report generation assistant. I can't help with that.");
     }
 
     @Test

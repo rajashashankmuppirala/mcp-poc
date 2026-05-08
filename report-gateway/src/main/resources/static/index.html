@@ -393,6 +393,32 @@
     return dataLines;
   }
 
+  // Display an error response as a friendly bot message (not raw JSON)
+  function showBotError(ui, response, fallback) {
+    ui.pre.remove();
+    ui.cursor.remove();
+    var msg = createEl('div', '', ui.bubble);
+    msg.style.color = '#f87171';
+    msg.style.lineHeight = '1.5';
+    msg.textContent = fallback || 'Something went wrong. Please try again.';
+    sendBtn.disabled = false;
+    promptEl.focus();
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  // Reusable error handler: parse JSON response and show friendly message
+  function handleErrorResponse(ui, response, defaultMsg) {
+    if (!response.ok) {
+      return response.json().then(function(err) {
+        var msg = err.message || defaultMsg || 'Something went wrong. Please try again.';
+        showBotError(ui, response, msg);
+      }).catch(function() {
+        showBotError(ui, response, defaultMsg || 'Something went wrong. Please try again.');
+      });
+    }
+    return null;
+  }
+
   function sendPrompt() {
     var text = promptEl.value.trim();
     if (!text) return;
@@ -427,14 +453,7 @@
     }).then(function(response) {
       updateSessionFromResponse(response);
       if (!response.ok) {
-        return response.json().then(function(err) {
-          ui.pre.textContent = 'Error ' + response.status + ': ' + (err.message || err.error || response.statusText);
-          ui.cursor.remove();
-        }).catch(function() {
-          ui.pre.textContent = 'Error ' + response.status + ': ' + response.statusText;
-          ui.cursor.remove();
-        });
-        return;
+        return handleErrorResponse(ui, response, 'I couldn\'t generate a chart for that request. Try specifying a chart type — for example, "pie chart of revenue by region."');
       }
       return response.json().then(function(data) {
         // Check if this is a clarification request
@@ -468,7 +487,7 @@
         ? JSON.parse(data.vegaLiteSpec)
         : data.vegaLiteSpec;
     } catch (e) {
-      ui.pre.textContent = 'Invalid chart spec: ' + e.message;
+      ui.pre.textContent = 'I couldn\'t generate a valid chart. Try a different chart type or data request.';
       sendBtn.disabled = false;
       return;
     }
@@ -486,11 +505,11 @@
         promptEl.focus();
         chatEl.scrollTop = chatEl.scrollHeight;
       }).catch(function(err) {
-        ui.pre.textContent = 'Chart render error: ' + err.message;
+        ui.pre.textContent = 'I couldn\'t render that chart. Please try a different visualization.';
         sendBtn.disabled = false;
       });
     }).catch(function(err) {
-      ui.pre.textContent = 'Could not load chart renderer.';
+      ui.pre.textContent = 'The chart library couldn\'t load. Please refresh the page and try again.';
       sendBtn.disabled = false;
     });
   }
@@ -544,16 +563,11 @@
           }).then(function(resp) {
             updateSessionFromResponse(resp);
             if (!resp.ok) {
-              return resp.json().then(function(err) {
-                newUi.pre.textContent = 'Error ' + resp.status + ': ' + (err.message || err.error || resp.statusText);
-                newUi.cursor.remove();
-              });
-              return;
+              return handleErrorResponse(newUi, resp, 'I couldn\'t generate that chart. Please try a different chart type.');
             }
             return resp.json().then(function(data) { renderChart(newUi, data, sendBtn); });
           }).catch(function(err) {
-            newUi.pre.textContent = 'Connection error: ' + err.message;
-            sendBtn.disabled = false;
+            showBotError(newUi, null, 'The connection failed. Please try again.');
           });
         };
         optionsDiv.appendChild(btn);
@@ -582,13 +596,7 @@
     }).then(function(response) {
       updateSessionFromResponse(response);
       if (!response.ok) {
-        return response.json().then(function(err) {
-          ui.pre.textContent = 'Error ' + response.status + ': ' + (err.message || err.error || response.statusText);
-          ui.cursor.remove();
-        }).catch(function() {
-          ui.pre.textContent = 'Error ' + response.status + ': ' + response.statusText;
-          ui.cursor.remove();
-        });
+        return handleErrorResponse(ui, response, 'I couldn\'t process your request. Try rephrasing with a report type and date range — for example, "Show me revenue for last quarter."');
       }
 
       var reader = response.body.getReader();
@@ -632,11 +640,7 @@
       }
       return read();
     }).catch(function(err) {
-      ui.pre.textContent = 'Connection error: ' + err.message;
-      ui.cursor.remove();
-      sendBtn.disabled = false;
-      promptEl.focus();
-      chatEl.scrollTop = chatEl.scrollHeight;
+      showBotError(ui, null, 'The connection failed. Please check your network and try again.');
     });
   }
 
@@ -655,13 +659,7 @@
     }).then(function(response) {
       updateSessionFromResponse(response);
       if (!response.ok) {
-        return response.json().then(function(err) {
-          ui.pre.textContent = 'Error ' + response.status + ': ' + (err.message || err.error || response.statusText);
-          ui.cursor.remove();
-        }).catch(function() {
-          ui.pre.textContent = 'Error ' + response.status + ': ' + response.statusText;
-          ui.cursor.remove();
-        });
+        return handleErrorResponse(ui, response, 'I couldn\'t process your request. Try rephrasing with a report type and date range — for example, "Show me revenue for last quarter."');
       }
 
       return response.text().then(function(rawText) {
@@ -693,7 +691,7 @@
         chatEl.scrollTop = chatEl.scrollHeight;
       });
     }).catch(function(err) {
-      ui.pre.textContent = 'Download error: ' + err.message;
+      ui.pre.textContent = 'The download failed. Please try again.';
       ui.cursor.remove();
       sendBtn.disabled = false;
       promptEl.focus();

@@ -32,6 +32,13 @@ class NoToolMatchException extends RuntimeException {
     NoToolMatchException(String message) { super(message); }
 }
 
+/**
+ * Thrown when the prompt is clearly outside the product's capabilities.
+ */
+class OutOfScopeException extends RuntimeException {
+    OutOfScopeException(String message) { super(message); }
+}
+
 @RestController
 @RequestMapping("/ai")
 public class AiController {
@@ -47,6 +54,7 @@ public class AiController {
     private final ChartGenerationService chartService;
     private final ConversationService conversationService;
     private final ContextInjector contextInjector;
+    private final PromptCapabilityChecker capabilityChecker;
     private final String fallbackMessage;
 
     private static final Set<String> CHART_SKILLS = Set.of("chart_builder");
@@ -62,6 +70,7 @@ public class AiController {
                         ChartGenerationService chartService,
                         ConversationService conversationService,
                         ContextInjector contextInjector,
+                        PromptCapabilityChecker capabilityChecker,
                         @Value("${llm.fallback-message:Sorry, I cannot help with this request.}") String fallbackMessage) {
         this.llmProvider = llmProvider;
         this.validator = validator;
@@ -72,6 +81,7 @@ public class AiController {
         this.chartService = chartService;
         this.conversationService = conversationService;
         this.contextInjector = contextInjector;
+        this.capabilityChecker = capabilityChecker;
         this.fallbackMessage = fallbackMessage;
     }
 
@@ -82,6 +92,13 @@ public class AiController {
 
         // Layer 1: Prompt injection check
         injectionDetector.check(request.prompt());
+
+        // Layer 1.5: Out-of-scope detection (friendly messages for non-capable prompts)
+        String scopeMessage = capabilityChecker.checkOutOfScope(request.prompt());
+        if (scopeMessage != null) {
+            log.info("[{}] Prompt flagged as out of scope or greeting", correlationId);
+            return Flux.error(new OutOfScopeException(scopeMessage));
+        }
 
         // Layer 2: Skill matching
         SkillDefinition matchedSkill = skillRegistry.matchSkill(request.prompt());
@@ -123,7 +140,8 @@ public class AiController {
                     Mono<ToolCall> toolCallMono = llmProvider.generateToolCall(request.prompt(), tools, systemPrompt)
                             .switchIfEmpty(Mono.defer(() -> {
                                 log.info("[{}] LLM ({}) returned null — prompt does not match any tool", correlationId, llmProvider.providerName());
-                                return Mono.error(new NoToolMatchException(fallbackMessage));
+                                String friendlyMsg = capabilityChecker.noToolMatchMessage(request.prompt());
+                                return Mono.error(new NoToolMatchException(friendlyMsg));
                             }))
                             .doOnNext(tc -> log.info("[{}] LLM ({}) returned tool: {}", correlationId, llmProvider.providerName(), tc.tool()));
 
@@ -193,6 +211,13 @@ public class AiController {
         // Layer 1: Prompt injection check
         injectionDetector.check(request.prompt());
 
+        // Layer 1.5: Out-of-scope detection
+        String scopeMsg = capabilityChecker.checkOutOfScope(request.prompt());
+        if (scopeMsg != null) {
+            log.info("[{}] Chart prompt flagged as out of scope", correlationId);
+            return Mono.error(new OutOfScopeException(scopeMsg));
+        }
+
         // Layer 2: Match chart_builder skill
         SkillDefinition skill = skillRegistry.matchSkill(request.prompt());
         if (skill == null || !CHART_SKILLS.contains(skill.name())) {
@@ -222,7 +247,8 @@ public class AiController {
                     return chartService.planDataQuery(request.prompt(), tools, systemPrompt, sessionContext.session())
                             .switchIfEmpty(Mono.defer(() -> {
                                 log.info("[{}] LLM returned null for chart planning", correlationId);
-                                return Mono.error(new NoToolMatchException(fallbackMessage));
+                                String friendlyMsg = capabilityChecker.noToolMatchMessage(request.prompt());
+                                return Mono.error(new NoToolMatchException(friendlyMsg));
                             }))
                             .doOnNext(tc -> validator.validate(tc))
                             // Save turn with tool call info
@@ -346,15 +372,22 @@ public class AiController {
         return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "NO_TOOL_MATCH", "message", ex.getMessage())));
     }
 
+    @ExceptionHandler(OutOfScopeException.class)
+    public Mono<ResponseEntity<Map<String, String>>> handleOutOfScope(OutOfScopeException ex) {
+        return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "OUT_OF_SCOPE", "message", ex.getMessage())));
+    }
+
     @ExceptionHandler(IllegalStateException.class)
     public Mono<ResponseEntity<Map<String, String>>> handleLlmError(IllegalStateException ex) {
-        return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "LLM_ERROR", "message", "Could not understand your request. Try rephrasing with a report type and date range.")));
+        String friendlyMsg = "I had trouble understanding your request. Please try rephrasing with a report type and date range — for example, \"Show me revenue for last quarter\" or \"Create a pie chart of sales by region.\"";
+        return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "LLM_ERROR", "message", friendlyMsg)));
     }
 
     @ExceptionHandler(Exception.class)
     public Mono<ResponseEntity<Map<String, String>>> handleGeneral(Exception ex) {
         log.error("Unexpected error", ex);
-        return Mono.just(ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "INTERNAL_ERROR", "message", "An unexpected error occurred")));
+        String friendlyMsg = "Something went wrong on my end. Please try again. If the issue persists, try a different query like \"Show me revenue for last quarter.\"";
+        return Mono.just(ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "INTERNAL_ERROR", "message", friendlyMsg)));
     }
 
     // Helper records for threading context through reactive chain

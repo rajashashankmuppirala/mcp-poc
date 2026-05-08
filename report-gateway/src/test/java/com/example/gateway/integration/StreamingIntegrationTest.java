@@ -33,11 +33,12 @@ class StreamingIntegrationTest {
     private final ChartGenerationService chartService = mock(ChartGenerationService.class);
     private final ConversationService conversationService = mock(ConversationService.class);
     private final ContextInjector contextInjector = mock(ContextInjector.class);
+    private final PromptCapabilityChecker capabilityChecker = mock(PromptCapabilityChecker.class);
     private final String fallbackMessage = "Sorry, I cannot help with this request.";
 
     private final WebTestClient webTestClient = WebTestClient
             .bindToController(new AiController(llmProvider, validator, mcpClient, injectionDetector,
-                    skillRegistry, auditLogger, chartService, conversationService, contextInjector, fallbackMessage))
+                    skillRegistry, auditLogger, chartService, conversationService, contextInjector, capabilityChecker, fallbackMessage))
             .build();
 
     private final ObjectMapper mapper = new ObjectMapper();
@@ -82,6 +83,10 @@ class StreamingIntegrationTest {
                     .responseType(meta != null ? meta.type() : "report")
                     .build();
         });
+
+        // Default: capability checker allows prompts through
+        when(capabilityChecker.checkOutOfScope(anyString())).thenReturn(null);
+        when(capabilityChecker.noToolMatchMessage(anyString())).thenReturn("I cannot help with that.");
     }
 
     @Test
