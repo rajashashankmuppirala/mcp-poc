@@ -41,12 +41,12 @@ mcp:
 #     - OpenRouter:    endpoint=https://openrouter.ai/api/v1, model=anthropic/claude-sonnet-4-20250514
 #
 llm:
-  provider: ${LLM_PROVIDER:mock}
+  provider: openai-compatible
   fallback-message: ${LLM_FALLBACK_MESSAGE:Sorry, I cannot help with this request.}
   openai:
-    endpoint: ${LLM_ENDPOINT:https://api.openai.com/v1}
-    api-key: ${LLM_API_KEY:}
-    model: ${LLM_MODEL:gpt-4o}
+    endpoint: https://api.minimax.io/v1
+    api-key: sk-cp-caeVkXGEqujT-knAdUBdE_OiUqGFPfaArUj1h914wtaGoQYSqilQcS7CH8AeUR0ToQXNJIsSQtuwmi2fukBXc6e2iLIHKGmodQmGQ6nYr-YGlIm8RfQhTlo
+    model: MiniMax-M2.7
 
 # Skills configuration — directory of Markdown files with frontmatter
 skills:

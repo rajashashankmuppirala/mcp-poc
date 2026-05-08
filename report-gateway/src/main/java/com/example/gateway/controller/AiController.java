@@ -130,20 +130,26 @@ public class AiController {
 
         // Extract or create session for conversational memory
         String sessionId = extractSessionId(exchange);
+        boolean isRetryCommand = isRetryPrompt(request.prompt());
 
-        boolean isDownload = request.prompt().toLowerCase().contains("download");
-
-        // Load session, execute, save turn, stream response
+        // Load session, resolve prompt if retry, execute, save turn, stream response
         return Mono.defer(() -> conversationService.loadOrCreateSession(sessionId))
                 .flatMapMany(sessionContext -> {
+                    // Resolve "retry" / "repeat" / "again" to the last turn's prompt
+                    String resolvedPrompt = isRetryCommand
+                            ? resolveRetryPromptFromSession(request.prompt(), sessionContext)
+                            : request.prompt();
+
                     // Set session header before any data streams
                     addSessionHeaders(exchange, sessionContext.sessionId());
 
+                    boolean isDownload = resolvedPrompt.toLowerCase().contains("download");
+
                     // Step 1: Call LLM provider with skill system prompt
-                    Mono<ToolCall> toolCallMono = llmProvider.generateToolCall(request.prompt(), tools, systemPrompt)
+                    Mono<ToolCall> toolCallMono = llmProvider.generateToolCall(resolvedPrompt, tools, systemPrompt)
                             .switchIfEmpty(Mono.defer(() -> {
                                 log.info("[{}] LLM ({}) returned null — prompt does not match any tool", correlationId, llmProvider.providerName());
-                                String friendlyMsg = capabilityChecker.noToolMatchMessage(request.prompt());
+                                String friendlyMsg = capabilityChecker.noToolMatchMessage(resolvedPrompt);
                                 return Mono.error(new NoToolMatchException(friendlyMsg));
                             }))
                             .doOnNext(tc -> log.info("[{}] LLM ({}) returned tool: {}", correlationId, llmProvider.providerName(), tc.tool()));
@@ -156,7 +162,7 @@ public class AiController {
                             })
                             .flatMap(tc -> {
                                 ConversationTurn turn = contextInjector.createTurn(
-                                        request.prompt(), tc,
+                                        resolvedPrompt, tc,
                                         new ContextInjector.ResponseMetadata("report", null, null, null));
                                 return conversationService.saveTurn(sessionContext, turn)
                                         .map(ctx -> new SavedToolCall(tc, ctx));
@@ -186,6 +192,99 @@ public class AiController {
                             );
 
                     // For download mode, prepend a metadata line with the filename
+                    if (isDownload) {
+                        final String filename = "generate_report-" + System.currentTimeMillis() + ".csv";
+                        return Flux.concat(Flux.just(filename), rowStream);
+                    }
+                    return rowStream;
+                });
+    }
+
+    @PostMapping(value = "/retry", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<String> handleRetry(@RequestBody AiRequest request, ServerWebExchange exchange) {
+        String correlationId = UUID.randomUUID().toString();
+        String sessionId = extractSessionId(exchange);
+
+        log.info("[{}] Retry requested for session {}", correlationId, sessionId);
+
+        return conversationService.loadOrCreateSession(sessionId)
+                .flatMapMany(sessionContext -> {
+                    ConversationTurn lastTurn = sessionContext.session().getLastTurn();
+                    String promptToRetry = request.prompt() != null && !request.prompt().isBlank()
+                            ? request.prompt()
+                            : (lastTurn != null ? lastTurn.userPrompt() : null);
+
+                    if (promptToRetry == null) {
+                        return Flux.error(new NoToolMatchException(capabilityChecker.noToolMatchMessage("Retry requested but no previous prompt found")));
+                    }
+
+                    log.info("[{}] Retrying prompt: {}", correlationId, promptToRetry);
+
+                    // Re-run the same flow as handleAiRequest with the last prompt
+                    AiRequest retryRequest = new AiRequest(promptToRetry);
+                    // Skip capability check on retry — user explicitly requested retry,
+                    // and the original prompt already passed through or will be validated by the LLM
+                    injectionDetector.check(retryRequest.prompt());
+
+                    SkillDefinition matchedSkill = skillRegistry.matchSkill(retryRequest.prompt());
+                    String skillName = matchedSkill != null ? matchedSkill.name() : "none";
+
+                    List<ToolDefinition> tools;
+                    if (matchedSkill != null && !matchedSkill.allowedTools().isEmpty()) {
+                        tools = mcpClient.getDiscoveredTools().stream()
+                                .filter(t -> matchedSkill.allowedTools().contains(t.name()))
+                                .toList();
+                    } else {
+                        tools = mcpClient.getDiscoveredTools();
+                    }
+
+                    if (tools.isEmpty()) {
+                        return Flux.error(new NoToolMatchException(fallbackMessage));
+                    }
+
+                    String systemPrompt = matchedSkill != null ? matchedSkill.systemPrompt() : null;
+                    String userToken = exchange.getRequest().getHeaders().getFirst("X-User-Token");
+                    boolean isDownload = retryRequest.prompt().toLowerCase().contains("download");
+
+                    addSessionHeaders(exchange, sessionContext.sessionId());
+
+                    Mono<ToolCall> toolCallMono = llmProvider.generateToolCall(retryRequest.prompt(), tools, systemPrompt)
+                            .switchIfEmpty(Mono.defer(() -> {
+                                log.info("[{}] LLM ({}) returned null on retry", correlationId, llmProvider.providerName());
+                                return Mono.error(new NoToolMatchException(capabilityChecker.noToolMatchMessage(retryRequest.prompt())));
+                            }));
+
+                    Mono<SavedToolCall> savedMono = toolCallMono
+                            .doOnNext(tc -> validator.validate(tc))
+                            .flatMap(tc -> {
+                                ConversationTurn turn = contextInjector.createTurn(
+                                        retryRequest.prompt(), tc,
+                                        new ContextInjector.ResponseMetadata("report", null, null, null));
+                                return conversationService.saveTurn(sessionContext, turn)
+                                        .map(ctx -> new SavedToolCall(tc, ctx));
+                            });
+
+                    Flux<String> rowStream = savedMono
+                            .flatMapMany(saved -> mcpClient.executeToolCall(saved.toolCall(), correlationId, userToken)
+                                    .doOnSubscribe(s ->
+                                            auditLogger.log(correlationId, "RETRY", Map.of(
+                                                    "skill", skillName,
+                                                    "sessionId", saved.context().sessionId()
+                                            ))
+                                    )
+                                    .flatMap(jsonArray -> {
+                                        ObjectMapper mapper = new ObjectMapper();
+                                        try {
+                                            List<String> rows = mapper.readValue(jsonArray,
+                                                    mapper.getTypeFactory().constructCollectionType(List.class, String.class));
+                                            return Flux.fromIterable(rows);
+                                        } catch (Exception e) {
+                                            log.warn("[{}] Failed to parse MCP array on retry: {}", correlationId, e.getMessage());
+                                            return Flux.just(jsonArray);
+                                        }
+                                    })
+                            );
+
                     if (isDownload) {
                         final String filename = "generate_report-" + System.currentTimeMillis() + ".csv";
                         return Flux.concat(Flux.just(filename), rowStream);
@@ -293,6 +392,96 @@ public class AiController {
                 .map(FinalResponse::response);
     }
 
+    /**
+     * Chart retry — re-runs the chart generation pipeline for the given prompt.
+     * Skips capability check since user explicitly requested retry.
+     */
+    @PostMapping(value = "/chart/retry", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Mono<Object> handleChartRetry(@RequestBody AiRequest request, ServerWebExchange exchange) {
+        String correlationId = UUID.randomUUID().toString();
+        String sessionId = extractSessionId(exchange);
+
+        log.info("[{}] Chart retry requested for session {}", correlationId, sessionId);
+
+        String promptToRetry = request.prompt() != null && !request.prompt().isBlank()
+                ? request.prompt()
+                : null;
+
+        if (promptToRetry == null) {
+            return Mono.error(new NoToolMatchException(fallbackMessage));
+        }
+
+        log.info("[{}] Chart retry prompt: {}", correlationId, promptToRetry);
+
+        // Skip capability/injection checks — user explicitly requested retry
+        SkillDefinition matchedSkill = skillRegistry.matchSkill(promptToRetry);
+        SkillDefinition skill;
+        if (matchedSkill != null && CHART_SKILLS.contains(matchedSkill.name())) {
+            skill = matchedSkill;
+        } else {
+            skill = skillRegistry.getAllSkills().stream()
+                    .filter(s -> CHART_SKILLS.contains(s.name()))
+                    .findFirst()
+                    .orElse(null);
+        }
+        if (skill == null) {
+            return Mono.error(new NoToolMatchException(fallbackMessage));
+        }
+
+        String detectedType = ChartGenerationService.detectChartType(promptToRetry);
+        List<ToolDefinition> tools = mcpClient.getDiscoveredTools().stream()
+                .filter(t -> skill.allowedTools().contains(t.name()))
+                .toList();
+
+        String systemPrompt = skill.systemPrompt();
+        String userToken = exchange.getRequest().getHeaders().getFirst("X-User-Token");
+
+        return conversationService.loadOrCreateSession(sessionId)
+                .flatMap(sessionContext -> {
+                    return chartService.planDataQuery(promptToRetry, tools, systemPrompt, sessionContext.session())
+                            .switchIfEmpty(Mono.defer(() -> {
+                                log.info("[{}] LLM returned null for chart retry planning", correlationId);
+                                return Mono.error(new NoToolMatchException(capabilityChecker.noToolMatchMessage(promptToRetry)));
+                            }))
+                            .doOnNext(tc -> validator.validate(tc))
+                            .flatMap(tc -> {
+                                ConversationTurn turn = contextInjector.createTurn(
+                                        promptToRetry, tc,
+                                        new ContextInjector.ResponseMetadata("chart", null, detectedType, null));
+                                return conversationService.saveTurn(sessionContext, turn)
+                                        .map(ctx -> new TurnAndContext(tc, ctx));
+                            })
+                            .flatMap(tac -> mcpClient.executeToolCall(tac.toolCall(), correlationId, userToken)
+                                    .collectList()
+                                    .map(rows -> new RawDataAndContext(String.join("\n", rows), tac.context())))
+                            .flatMap(dac -> {
+                                log.info("[{}] Chart retry detected type: {}", correlationId, detectedType);
+                                return chartService.generateChartSpec(
+                                        promptToRetry, dac.rawData(), detectedType, systemPrompt)
+                                        .map(spec -> new ChartResponseAndContext(spec, dac.context()));
+                            })
+                            .flatMap(crc -> {
+                                if (crc.chartResponse() instanceof ChartResponse cr) {
+                                    ConversationTurn updatedTurn = contextInjector.createTurn(
+                                            promptToRetry, null,
+                                            new ContextInjector.ResponseMetadata(
+                                                    "chart", cr.title(), cr.chartType(), null));
+                                    return conversationService.saveTurn(crc.context(), updatedTurn)
+                                            .map(finalCtx -> new FinalResponse(crc.chartResponse(), finalCtx));
+                                }
+                                return Mono.just(new FinalResponse(crc.chartResponse(), crc.context()));
+                            });
+                })
+                .doOnSuccess(finalResp -> {
+                    auditLogger.log(correlationId, "CHART_RETRY", Map.of(
+                            "skill", skill.name(),
+                            "sessionId", finalResp.context().sessionId()
+                    ));
+                    addSessionHeaders(exchange, finalResp.context().sessionId());
+                })
+                .map(FinalResponse::response);
+    }
+
     private String extractSessionId(ServerWebExchange exchange) {
         // First try header
         String headerValue = exchange.getRequest().getHeaders().getFirst(SESSION_ID_HEADER);
@@ -305,6 +494,28 @@ public class AiController {
         }
         // Generate new session ID
         return UUID.randomUUID().toString();
+    }
+
+    /**
+     * Check if the prompt is a retry command.
+     */
+    private boolean isRetryPrompt(String prompt) {
+        if (prompt == null || prompt.isBlank()) return false;
+        String trimmed = prompt.toLowerCase().trim();
+        return trimmed.equals("retry") || trimmed.equals("repeat") || trimmed.equals("again");
+    }
+
+    /**
+     * Resolve a retry command to the last turn's prompt from an already-loaded session.
+     */
+    private String resolveRetryPromptFromSession(String originalPrompt, SessionContext sessionContext) {
+        ConversationTurn lastTurn = sessionContext.session().getLastTurn();
+        if (lastTurn != null) {
+            log.info("Resolved '{}' to last turn prompt: {}", originalPrompt, lastTurn.userPrompt());
+            return lastTurn.userPrompt();
+        }
+        log.info("Could not resolve '{}' — no previous turn found, returning as-is", originalPrompt);
+        return originalPrompt;
     }
 
     private void addSessionHeaders(ServerWebExchange exchange, String sessionId) {

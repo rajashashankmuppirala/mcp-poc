@@ -129,6 +129,10 @@
   // Session state
   var sessionId = null;
 
+  // Track last prompt and mode for retry
+  var lastPrompt = null;
+  var lastMode = null; // 'stream', 'chart', 'download'
+
   // Try to restore session from cookie on page load
   function getCookie(name) {
     var match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
@@ -400,7 +404,7 @@
     var msg = createEl('div', '', ui.bubble);
     msg.style.color = '#f87171';
     msg.style.lineHeight = '1.5';
-    msg.textContent = fallback || 'Something went wrong. Please try again.';
+    msg.textContent = fallback || 'Something went wrong. Please try again. Type "retry" to re-run your last request.';
     sendBtn.disabled = false;
     promptEl.focus();
     chatEl.scrollTop = chatEl.scrollHeight;
@@ -435,15 +439,34 @@
     promptEl.value = '';
     promptEl.style.height = 'auto';
     sendBtn.disabled = true;
-    addUserMessage(text);
 
-    var isDownload = text.toLowerCase().indexOf('download') !== -1;
+    // Intercept retry commands — re-send the last prompt via the same endpoint
+    var lowerText = text.toLowerCase();
+    if ((lowerText === 'retry' || lowerText === 'repeat' || lowerText === 'again') && lastPrompt && lastMode) {
+      addUserMessage(text);
+      if (lastMode === 'download') {
+        sendAsDownload(lastPrompt);
+      } else if (lastMode === 'chart') {
+        sendAsChart(lastPrompt);
+      } else {
+        sendAsStream(lastPrompt);
+      }
+      return;
+    }
+
+    addUserMessage(text);
+    lastPrompt = text;
+
+    var isDownload = lowerText.indexOf('download') !== -1;
 
     if (isDownload) {
+      lastMode = 'download';
       sendAsDownload(text);
     } else if (isChartPrompt(text)) {
+      lastMode = 'chart';
       sendAsChart(text);
     } else {
+      lastMode = 'stream';
       sendAsStream(text);
     }
   }
@@ -476,10 +499,8 @@
         renderChart(ui, data, sendBtn);
       });
     }).catch(function(err) {
-      ui.pre.textContent = 'Connection error: ' + err.message;
-      ui.cursor.remove();
-      sendBtn.disabled = false;
-      promptEl.focus();
+      if (err.message === '__handled__') return;
+      showBotError(ui, null, 'Connection error: ' + err.message);
     });
   }
 
@@ -497,7 +518,7 @@
         ? JSON.parse(data.vegaLiteSpec)
         : data.vegaLiteSpec;
     } catch (e) {
-      ui.pre.textContent = 'I couldn\'t generate a valid chart. Try a different chart type or data request.';
+      ui.pre.textContent = 'I couldn\'t generate a valid chart. Try a different chart type or data request. Type "retry" to re-run your last request.';
       sendBtn.disabled = false;
       return;
     }
@@ -515,7 +536,7 @@
         promptEl.focus();
         chatEl.scrollTop = chatEl.scrollHeight;
       }).catch(function(err) {
-        ui.pre.textContent = 'I couldn\'t render that chart. Please try a different visualization.';
+        ui.pre.textContent = 'I couldn\'t render that chart. Please try a different visualization. Type "retry" to re-run your last request.';
         sendBtn.disabled = false;
       });
     }).catch(function(err) {
@@ -606,7 +627,7 @@
     }).then(function(response) {
       updateSessionFromResponse(response);
       if (!response.ok) {
-        return handleErrorResponse(ui, response, 'I couldn\'t process your request. Try rephrasing with a report type and date range — for example, "Show me revenue for last quarter."');
+        return handleErrorResponse(ui, response, 'I couldn\'t process your request. Try rephrasing with a report type and date range — for example, "Show me revenue for last quarter."', text);
       }
 
       var reader = response.body.getReader();
@@ -670,7 +691,7 @@
     }).then(function(response) {
       updateSessionFromResponse(response);
       if (!response.ok) {
-        return handleErrorResponse(ui, response, 'I couldn\'t process your request. Try rephrasing with a report type and date range — for example, "Show me revenue for last quarter."');
+        return handleErrorResponse(ui, response, 'I couldn\'t process your request. Try rephrasing with a report type and date range — for example, "Show me revenue for last quarter."', text);
       }
 
       return response.text().then(function(rawText) {
@@ -702,8 +723,8 @@
         chatEl.scrollTop = chatEl.scrollHeight;
       });
     }).catch(function(err) {
-      if (err.message === '__handled__') return; // error already displayed
-      ui.pre.textContent = 'The download failed: ' + (err.message || 'unknown error') + '. Please try again.';
+      if (err.message === '__handled__') return;
+      ui.pre.textContent = 'The download failed. ' + (err.message || '') + ' Type "retry" to try again.';
       ui.cursor.remove();
       sendBtn.disabled = false;
       promptEl.focus();

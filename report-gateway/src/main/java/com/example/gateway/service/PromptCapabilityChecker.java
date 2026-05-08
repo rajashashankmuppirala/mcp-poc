@@ -52,7 +52,8 @@ public class PromptCapabilityChecker {
             "orders", "inventory", "customers", "expenses", "profit",
             "subscription", "pipeline", "dataflow", "job", "failed",
             "success", "status", "summary", "breakdown", "trend",
-            "show me", "generate", "create", "visualize", "breakdown"
+            "show me", "generate", "create", "visualize", "breakdown",
+            "retry", "repeat", "again"
     );
 
     /**
