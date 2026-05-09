@@ -13,6 +13,12 @@ import java.util.List;
 public interface ContextInjector {
 
     /**
+     * Retrieves relevant RAG context for a query.
+     * Returns a formatted string of document snippets, or empty string if none found.
+     */
+    String retrieveRagContext(String query);
+
+    /**
      * Builds a prompt with conversation context prepended.
      * Uses sliding window of recent turns (default: last 8 turns).
      *

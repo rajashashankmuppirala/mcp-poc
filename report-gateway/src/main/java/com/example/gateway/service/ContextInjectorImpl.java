@@ -2,6 +2,7 @@ package com.example.gateway.service;
 
 import com.example.gateway.config.SessionConfig;
 import com.example.gateway.model.*;
+import com.example.gateway.service.RagService.ScoredChunk;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,14 +23,40 @@ public class ContextInjectorImpl implements ContextInjector {
     private static final Logger log = LoggerFactory.getLogger(ContextInjectorImpl.class);
 
     private final SessionConfig sessionConfig;
+    private final RagService ragService;
 
-    public ContextInjectorImpl(SessionConfig sessionConfig) {
+    public ContextInjectorImpl(SessionConfig sessionConfig, RagService ragService) {
         this.sessionConfig = sessionConfig;
+        this.ragService = ragService;
+    }
+
+    @Override
+    public String retrieveRagContext(String query) {
+        List<ScoredChunk> chunks = ragService.retrieve(query, 3);
+        if (chunks.isEmpty()) return "";
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== Relevant Knowledge Base Context ===\n");
+        sb.append("The following snippets may be relevant to the user's query:\n\n");
+        for (ScoredChunk scored : chunks) {
+            DocumentChunk chunk = scored.chunk();
+            sb.append("[Document chunk ").append(chunk.chunkIndex() + 1)
+              .append(", score=").append(String.format("%.2f", scored.score()))
+              .append("] ").append(chunk.text()).append("\n\n");
+        }
+        log.info("RAG context injected: {} chunks for query", chunks.size());
+        return sb.toString();
     }
 
     @Override
     public String buildContextPrompt(String currentPrompt, ConversationSession session) {
         StringBuilder prompt = new StringBuilder();
+
+        // RAG context — retrieved from knowledge base
+        String ragContext = retrieveRagContext(currentPrompt);
+        if (!ragContext.isEmpty()) {
+            prompt.append(ragContext);
+        }
 
         // Build date reference section
         prompt.append(buildDateReference());

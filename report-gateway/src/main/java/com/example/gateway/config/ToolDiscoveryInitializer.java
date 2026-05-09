@@ -2,6 +2,7 @@ package com.example.gateway.config;
 
 import com.example.gateway.model.SkillDefinition;
 import com.example.gateway.service.McpClientService;
+import com.example.gateway.service.RagAutoIngestionService;
 import com.example.gateway.service.SkillRegistry;
 import com.example.gateway.service.ToolCallValidator;
 import org.slf4j.Logger;
@@ -28,17 +29,20 @@ public class ToolDiscoveryInitializer implements ApplicationRunner {
     private final McpClientService mcpClientService;
     private final ToolCallValidator validator;
     private final SkillRegistry skillRegistry;
+    private final RagAutoIngestionService ragAutoIngestion;
     private final Map<String, String> serverUrls;
 
     public ToolDiscoveryInitializer(
             McpClientService mcpClientService,
             ToolCallValidator validator,
             SkillRegistry skillRegistry,
+            RagAutoIngestionService ragAutoIngestion,
             @Value("${mcp.client.servers.reports.url:http://localhost:8081}") String reportsUrl,
             @Value("${mcp.client.servers.ops.url:http://localhost:8083}") String opsUrl) {
         this.mcpClientService = mcpClientService;
         this.validator = validator;
         this.skillRegistry = skillRegistry;
+        this.ragAutoIngestion = ragAutoIngestion;
         this.serverUrls = Map.of("reports", reportsUrl, "ops", opsUrl);
     }
 
@@ -56,6 +60,9 @@ public class ToolDiscoveryInitializer implements ApplicationRunner {
                 tools.stream().map(com.example.gateway.model.ToolDefinition::name).toList());
 
         validateSkillsAgainstServers();
+
+        // Auto-ingest tool schemas and report metadata into RAG (startup only)
+        ragAutoIngestion.ingestAll(tools);
     }
 
     /**

@@ -43,6 +43,13 @@ public class McpClientService {
      * Builds tool→server mapping for auto-routing.
      */
     public Mono<Void> discoverAndCacheTools() {
+        // Clear existing cache before re-discovery to prevent duplicates
+        toolServerMap.clear();
+        allTools.clear();
+        return doDiscoverAll();
+    }
+
+    private Mono<Void> doDiscoverAll() {
         List<Mono<Void>> discoveries = new ArrayList<>();
 
         for (Map.Entry<String, McpAsyncClient> entry : mcpClients.entrySet()) {
@@ -69,6 +76,32 @@ public class McpClientService {
         return Mono.when(discoveries)
                 .doOnSuccess(v -> log.info("Total tools discovered across all servers: {}", allTools.size()))
                 .doOnError(e -> log.warn("Failed to discover tools from MCP server: {}", e.getMessage()));
+    }
+
+    /**
+     * Re-discover tools from a specific server, replacing its old entries in the cache.
+     */
+    public Mono<List<ToolDefinition>> refreshServerTools(String serverId) {
+        McpAsyncClient client = mcpClients.get(serverId);
+        if (client == null) {
+            return Mono.error(new IllegalArgumentException("Unknown MCP server: " + serverId));
+        }
+        // Remove old entries for this server
+        removeServerTools(serverId);
+        return discoverToolsForServer(serverId);
+    }
+
+    private void removeServerTools(String serverId) {
+        // Build list of tools to remove
+        List<String> toRemove = allTools.stream()
+                .filter(t -> serverId.equals(toolServerMap.get(t.name())))
+                .map(ToolDefinition::name)
+                .toList();
+        for (String name : toRemove) {
+            toolServerMap.remove(name);
+        }
+        allTools.removeIf(t -> toolServerMap.get(t.name()) == null);
+        log.info("Removed {} tools from server '{}' cache", toRemove.size(), serverId);
     }
 
     /**

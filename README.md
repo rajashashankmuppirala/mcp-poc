@@ -382,6 +382,132 @@ Example pronoun resolution:
 
 ---
 
+## RAG (Retrieval-Augmented Generation)
+
+The system includes a RAG layer that enriches LLM prompts with domain-specific knowledge from ingested documents. This helps the LLM understand internal terminology, report schemas, and data source mappings that aren't in the base model.
+
+### How It Works
+
+```
+Document Ingestion:
+  POST /rag/documents
+  {"title": "Revenue Guide", "content": "Revenue is calculated...", "tags": ["finance"]}
+  → System chunks document into ~200 char segments
+  → Extracts keywords per chunk
+  → Stores in ConcurrentHashMap (POC)
+
+Auto-Ingestion (on startup):
+  → Tool schemas from MCP servers (auto-tool:generate_report, etc.)
+  → Report schemas from Domain API (auto-report:revenue, etc.)
+  → Uses deterministic IDs so re-ingestion replaces instead of duplicates
+
+Query Flow:
+  User: "Show me revenue for Q1"
+  → ContextInjector retrieves top 3 matching chunks
+  → Injects them into LLM system prompt before tool calling
+  → LLM sees relevant context + conversation history + current request
+```
+
+### Document Management API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `POST /rag/documents` | Create | Ingest a document with title, content, and optional tags |
+| `GET /rag/documents` | List | List all ingested documents with chunk counts |
+| `GET /rag/documents/{id}` | Get | Retrieve a specific document by ID |
+| `DELETE /rag/documents/{id}` | Delete | Remove a specific document |
+| `DELETE /rag/documents` | Clear | Remove all documents |
+
+### Auto-Ingested Documents
+
+On gateway startup, two types of documents are automatically ingested:
+
+- **Tool schemas** — from each MCP server's `tools/list` results. Each tool becomes a RAG doc with its name, description, and parameter schema (e.g., `auto-tool:generate_report`)
+- **Report schemas** — from the Domain API's `GET /api/v1/reports/metadata` endpoint. Each of the 8 report types becomes a RAG doc with descriptions, regions, parameters, and example queries (e.g., `auto-report:revenue`)
+
+### Retrieval
+
+- **Chunking**: Documents split by sentences into ~200 char chunks
+- **Keyword extraction**: Words >2 chars extracted per chunk
+- **Scoring**: Keyword overlap ratio (`matchCount / (queryTerms + keywords - matchCount)`)
+- **Top-K**: Returns up to 3 most relevant chunks per query
+
+### Configuration
+
+For the POC, the RAG store is in-memory (`ConcurrentHashMap`). Persistent storage (Redis, vector DB) can be added later by implementing the `RagService` interface.
+
+---
+
+## Sync System
+
+The gateway keeps tools, report schemas, and RAG data in sync with MCP servers and the Domain API — **without requiring a restart**.
+
+### Three Sync Triggers
+
+| Trigger | When | What |
+|---------|------|------|
+| **Startup** | Gateway launches | Discovers tools, validates skills, auto-ingests RAG docs |
+| **Scheduled** | Every 5 minutes (configurable) | Re-discovers all tools from all MCP servers, re-ingests RAG |
+| **Admin endpoint** | On-demand via `POST` | Full sync, per-server sync, or report schema sync |
+
+### Admin Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /admin/sync` | Full sync — re-discover tools from all MCP servers + refresh all RAG docs |
+| `POST /admin/sync/reports` | Re-discover tools from reports MCP server only |
+| `POST /admin/sync/ops` | Re-discover tools from ops MCP server only |
+| `POST /admin/sync/reports-metadata` | Re-fetch report schemas from Domain API |
+| `GET /admin/sync/status` | Current tool count, RAG doc count, tools by server |
+
+### Example: Sync After Deploying a New MCP Tool
+
+```bash
+# After deploying a new @McpTool to the reports server:
+curl -X POST http://localhost:8080/admin/sync/reports
+
+# Response:
+{
+  "scope": "server:reports",
+  "success": true,
+  "toolCount": 2,
+  "ragDocCount": 15,
+  "durationMs": 234,
+  "errors": []
+}
+```
+
+### How It Prevents Staleness
+
+```
+MCP Server adds new tool "list_active_jobs"
+         ↓
+Gateway scheduled sync (every 5 min) OR admin POST /admin/sync
+         ↓
+McpClientService.refreshServerTools("reports")
+  → Removes old tools from reports server cache
+  → Calls tools/list on reports server
+  → Adds new tools including list_active_jobs
+         ↓
+ToolCallValidator updates allowlist
+         ↓
+RagAutoIngestionService.refreshToolSchemas()
+  → Deletes old auto-tool: docs
+  → Re-inserts with new tool schemas
+```
+
+### Configuration
+
+```yaml
+sync:
+  interval-minutes: 5        # How often to run scheduled sync
+  initial-delay-minutes: 10  # Wait 10 min after startup before first scheduled sync
+```
+
+Change via environment variables: `SYNC_INTERVAL_MINUTES=2`, `SYNC_INITIAL_DELAY_MINUTES=5`.
+
+---
+
 ## LLM Integration
 
 The gateway uses a pluggable `LlmProvider` interface to convert natural language prompts into structured tool calls. Two providers ship with the project:
@@ -520,12 +646,17 @@ mcp-poc/
 │   └── src/main/java/com/example/gateway/
 │       ├── controller/AiController.java        # WebFlux SSE (/ai/request), chart JSON (/ai/chart)
 │       ├── controller/ConversationController.java # Session management endpoints (/session/*)
+│       ├── controller/DocumentIngestionController.java # RAG document CRUD (/rag/documents)
+│       ├── controller/SyncController.java       # Admin sync endpoints (/admin/sync/*)
 │       ├── config/McpClientConfig.java         # Multi-server MCP client beans
 │       ├── config/RedisConfig.java              # Redis session store configuration
 │       ├── config/SessionConfig.java            # Session timeout and storage settings
 │       ├── config/ToolDiscoveryInitializer.java # Tool discovery + skill validation against servers
+│       ├── config/SyncScheduler.java            # Periodic sync scheduler (@Scheduled)
 │       ├── service/McpClientService.java       # Multi-server tool execution, auto-routing
 │       ├── service/SkillRegistry.java           # Markdown skills + server capability validation
+│       ├── service/SyncService.java             # Orchestrates tool + RAG sync across servers
+│       ├── service/RagAutoIngestionService.java # Auto-ingests tool/report schemas with deterministic IDs
 │       ├── service/LlmProvider.java             # Interface for pluggable LLM providers
 │       ├── service/MockLlmProvider.java         # NL → ToolCall (keyword-based mock)
 │       ├── service/GenericOpenAiProvider.java   # NL → ToolCall (OpenAI-compatible REST API)
@@ -538,13 +669,18 @@ mcp-poc/
 │       ├── service/SessionStore.java            # Interface for session persistence
 │       ├── service/RedisSessionStore.java       # Redis-based session storage
 │       ├── service/InMemorySessionStore.java    # In-memory session storage (dev)
-│       ├── filter/RequestLoggingWebFilter.java  # Rate limiting + correlation IDs
+│       ├── service/RagService.java              # Interface for RAG document management
+│       ├── service/InMemoryRagStore.java        # In-memory RAG store with keyword retrieval
+│       ├── service/ContextInjector.java         # Context prompt building with history
+│       ├── service/ContextInjectorImpl.java     # Implementation with RAG + date + history injection
 │       ├── model/SkillDefinition.java           # Skill record (name, triggers, tools)
 │       ├── model/ChartResponse.java             # Chart response record (vegaLiteSpec)
 │       ├── model/ConversationSession.java       # Session with turns, userId, timestamps
 │       ├── model/ConversationTurn.java          # Single turn (prompt, filters, response)
 │       ├── model/ExtractedFilters.java          # Structured parameters from tool calls
 │       ├── model/SessionContext.java            # Wrapper for session + ID
+│       ├── model/KnowledgeDocument.java         # Document record with auto-chunking
+│       ├── model/DocumentChunk.java             # Chunked text with keyword extraction
 │       └── static/index.html                    # Chat UI with session support
 │   └── src/main/resources/skills/
 │       ├── report_analyst.md                    # Business report agent skill
@@ -565,6 +701,7 @@ mcp-poc/
 ├── domain-api/              # Spring Boot Domain API
 │   └── src/main/java/com/example/domain/
 │       └── controller/ReportStreamController.java  # NDJSON streaming
+│       └── controller/ReportMetadataController.java  # Report schema metadata endpoint
 ├── ARCHITECTURE_V2.md       # Detailed architecture with Mermaid diagrams
 └── docker-compose.yml       # All four services
 ```
@@ -580,6 +717,8 @@ mcp-poc/
 | LLM | Pluggable `LlmProvider` interface — mock or any OpenAI-compatible endpoint |
 | Charts | Two-phase LLM pipeline → Vega-Lite JSON spec → client-side rendering |
 | Session Storage | Redis (production) / ConcurrentHashMap (dev) — reactive Spring Data |
+| RAG | Keyword-based retrieval + auto-ingestion on startup + scheduled sync |
+| Sync | Admin-triggered + scheduled re-discovery of tools/schemas without restart |
 | Domain API | Spring Boot 4.0.0 (WebMVC) |
 | Runtime | Java 21 |
 

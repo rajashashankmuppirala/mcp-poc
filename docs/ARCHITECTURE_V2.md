@@ -40,10 +40,10 @@ flowchart TD
     DomainAPI -->|streaming rows| ReportTools
     ReportTools -->|JSON array| ReportsMCP
     OpsTools -->|JSON array| OpsMCP
-    ReportsMCP -->|SSE events| MCPClient
-    OpsMCP -->|SSE events| MCPClient
+    ReportsMCP -->|Streamable HTTP responses| MCPClient
+    OpsMCP -->|Streamable HTTP responses| MCPClient
     MCPClient -->|Flux of rows| Gateway
-    Gateway -->|text/event-stream| Browser
+    Gateway -->|text/event-stream (SSE)| Browser
     Browser -->|renders rows| User
 ```
 
@@ -297,11 +297,11 @@ sequenceDiagram
     MC->>RMCP: POST /mcp tools/call generate_report
     RMCP->>DA: POST /api/v1/reports/stream
     DA-->>RMCP: ["row1,data-1,ts", "row2,data-2,ts", ...]
-    RMCP-->>MC: SSE: data:{"result":{...}}
+    RMCP-->>MC: Streamable HTTP: data:{"result":{...}}
     MC-->>GW: Flux of parsed rows
 
     Note over GW,User: Step 6: Stream to browser
-    GW-->>User: text/event-stream<br/>data:row1,data-1,ts<br/>data:row2,data-2,ts<br/>...
+    GW-->>User: text/event-stream (SSE)<br/>data:row1,data-1,ts<br/>data:row2,data-2,ts<br/>...
 ```
 
 ---
@@ -379,7 +379,7 @@ sequenceDiagram
     RMCP-->>MC: JSON-RPC result
     MC-->>GW: Flux of rows
 
-    Note over GW: Detects "download" in prompt<br/>prepends filename as first SSE event
+    Note over GW: Detects "download" in prompt<br/>prepends filename as first SSE event to browser
     GW-->>User: data:generate_report-1778128768955.csv<br/>data:row1,data-1,ts<br/>data:row2,data-2,ts<br/>...
 ```
 
@@ -577,7 +577,7 @@ sequenceDiagram
     Tool->>Backend: call backend API
     Backend-->>Tool: response data
     Tool-->>Server: List of String results
-    Server-->>Transport: JSON-RPC result (SSE)
+    Server-->>Transport: JSON-RPC result (Streamable HTTP)
     Transport-->>Client: data:{"jsonrpc": "2.0",<br/>"id": 2, "result": {...}}
 ```
 
@@ -591,7 +591,7 @@ sequenceDiagram
 |--------|-------|
 | **MCP Spec** | 2025-03-26 |
 | **Transport** | Single `POST /mcp` endpoint |
-| **Protocol** | JSON-RPC 2.0 over HTTP POST with SSE responses |
+| **Protocol** | JSON-RPC 2.0 over HTTP POST (single endpoint, Streamable HTTP) |
 | **Session** | `Mcp-Session-Id` header |
 | **Spring AI** | `protocol: STREAMABLE` |
 
@@ -775,6 +775,11 @@ MCP Server → Domain API (Bearer token)
 | Ops Data Service | `ops-mcp-server/.../service/OpsDataService.java` | Simulated failed job and dataflow data |
 | Domain Controller | `domain-api/.../controller/ReportStreamController.java` | NDJSON streaming |
 | Frontend | `report-gateway/.../static/index.html` | Chat UI with SSE parsing |
+| RAG Models | `report-gateway/.../model/KnowledgeDocument.java` | Document record with auto-chunking |
+| RAG Models | `report-gateway/.../model/DocumentChunk.java` | Chunked text with keyword extraction |
+| RAG Service | `report-gateway/.../service/RagService.java` | Interface for document management |
+| RAG Service | `report-gateway/.../service/InMemoryRagStore.java` | ConcurrentHashMap-backed store |
+| RAG Controller | `report-gateway/.../controller/DocumentIngestionController.java` | CRUD endpoints for documents |
 
 ---
 
@@ -1102,6 +1107,183 @@ The gateway remains stateless — all session data is externalized:
 | **Horizontal Scaling** | Multiple gateway instances share Redis session store |
 | **Restart Safety** | Sessions survive gateway restart (with Redis) |
 | **TTL Management** | Automatic expiry handled by storage layer |
+
+---
+
+## RAG Layer (Retrieval-Augmented Generation)
+
+The RAG layer enriches LLM prompts with domain-specific knowledge from ingested documents, improving tool selection accuracy and response quality for domain-specific queries.
+
+### Architecture Overview
+
+```mermaid
+flowchart TD
+    subgraph Ingestion["Document Ingestion"]
+        API["DocumentIngestionController\nPOST /rag/documents"]
+        RagSvc["RagService Interface"]
+        Store[(InMemoryRagStore\nConcurrentHashMap)]
+    end
+
+    subgraph Retrieval["Context Retrieval"]
+        CtxInj2["ContextInjectorImpl\nretrieveRagContext()\nbuildContextPrompt()"]
+        Chunk["DocumentChunk\nchunkContent()\nextractKeywords()"]
+        Score["ScoredChunk\nkeyword overlap scoring"]
+    end
+
+    subgraph Prompt["LLM Prompt Assembly"]
+        RAGCtx["=== Relevant Knowledge Base Context ===\n[chunk 1, score=0.75] ...\n[chunk 2, score=0.50] ..."]
+        DateCtx["=== Date Reference ==="]
+        ConvCtx["=== Conversation History ==="]
+        CurrReq["=== Current Request ==="]
+    end
+
+    API --> RagSvc
+    RagSvc --> Store
+    RagSvc --> Chunk
+    CtxInj2 --> RagSvc
+    RagSvc --> Score
+    CtxInj2 --> RAGCtx
+    RAGCtx --> DateCtx
+    DateCtx --> ConvCtx
+    ConvCtx --> CurrReq
+```
+
+### Key Components
+
+| Component | Responsibility | Implementation |
+|-----------|---------------|----------------|
+| **RagService** | Interface for document management | `ingest()`, `retrieve()`, `getById()`, `listAll()`, `delete()`, `clear()` |
+| **InMemoryRagStore** | POC storage implementation | `ConcurrentHashMap` with keyword overlap scoring |
+| **KnowledgeDocument** | Immutable document record | `id`, `title`, `content`, `tags`, `createdAt`, `chunks[]` |
+| **DocumentChunk** | Chunked text with keywords | `documentId`, `chunkIndex`, `text`, `keywords[]` |
+| **DocumentIngestionController** | REST API for document CRUD | `POST/GET/DELETE /rag/documents` |
+| **ContextInjectorImpl** | RAG context injection | `retrieveRagContext()` called in `buildContextPrompt()` |
+
+### Prompt Assembly Order
+
+The `ContextInjectorImpl.buildContextPrompt()` assembles the final prompt in this order:
+
+1. **RAG context** — Top 3 relevant document snippets (if any match)
+2. **Date reference** — Dynamic date mappings ("last year", "this quarter")
+3. **Conversation summary** — Condensed summary if session exceeded max turns
+4. **Conversation history** — Sliding window of recent turns (last 8)
+5. **Current request** — User's latest message
+
+### Retrieval Algorithm (POC)
+
+For the POC, retrieval uses keyword overlap scoring — no embeddings required:
+
+1. **Chunking**: Document content split by sentence boundaries into ~200 char chunks
+2. **Keyword extraction**: All words >2 chars extracted per chunk (lowercased)
+3. **Query tokenization**: User query split into lowercase tokens
+4. **Scoring**: For each chunk, compute `intersection(queryTokens, chunkKeywords) / (|queryTokens| + |keywords| - intersection)`
+5. **Ranking**: Chunks sorted by score descending, top K returned
+
+This approach is sufficient for POC scale (up to ~100 documents) and requires no external embedding service.
+
+### Storage Strategy
+
+| Environment | Store | Notes |
+|-------------|-------|-------|
+| **POC / Dev** | `InMemoryRagStore` (ConcurrentHashMap) | Stateless, no persistence |
+| **Production** | Future: Redis or vector DB (e.g., pgvector, Pinecone) | Implement `RagService` interface |
+
+### RAG + Conversational Memory Integration
+
+RAG context is injected **before** conversation history in the prompt, so the LLM sees:
+- Relevant domain knowledge first (terminology, schemas)
+- Then conversation context (previous requests, extracted filters)
+- Then the current request
+
+This ordering ensures domain knowledge is available as reference when interpreting the conversation.
+
+---
+
+## Tool & Schema Sync System
+
+The gateway keeps tools, report schemas, and RAG data in sync with MCP servers and the Domain API without requiring a restart.
+
+### Problem Solved
+
+Without sync, if an MCP server adds a new `@McpTool` or the Domain API adds a new report type, the gateway would remain unaware until it's restarted. The sync system solves this through three triggers:
+
+| Trigger | When | Component |
+|---------|------|-----------|
+| **Startup** | Gateway launches | `ToolDiscoveryInitializer` + `RagAutoIngestionService` |
+| **Scheduled** | Every 5 minutes (configurable) | `SyncScheduler` (`@Scheduled`) |
+| **Admin** | On-demand via HTTP POST | `SyncController` → `SyncService` |
+
+### Architecture
+
+```mermaid
+flowchart TD
+    subgraph Triggers["Sync Triggers"]
+        Start["Startup\nToolDiscoveryInitializer"]
+        Sched["Scheduled\nSyncScheduler (5 min)"]
+        Admin["Admin Endpoint\nPOST /admin/sync/*"]
+    end
+
+    subgraph Sync["SyncService Orchestrator"]
+        SyncAll["syncAll()"]
+        Refresh["refreshServer(serverId)"]
+        RefreshRpt["refreshReportSchemas()"]
+    end
+
+    subgraph Discovery["Tool Discovery"]
+        McpSvc["McpClientService\nrefreshServerTools()\ndiscoverAndCacheTools()"]
+        Servers["MCP Servers\nreports (8081)\nops (8083)"]
+    end
+
+    subgraph RAG["RAG Re-ingestion"]
+        RagAuto["RagAutoIngestionService\ningestWithId()\nrefreshToolSchemas()"]
+        Domain["Domain API\nGET /api/v1/reports/metadata"]
+    end
+
+    subgraph Validator["Allowlist Update"]
+        Val["ToolCallValidator\nupdateAllowedTools()"]
+    end
+
+    Start --> McpSvc
+    Start --> RagAuto
+    Sched --> SyncAll
+    Admin --> SyncAll
+    Admin --> Refresh
+    Admin --> RefreshRpt
+    SyncAll --> McpSvc
+    Refresh --> McpSvc
+    RefreshRpt --> RagAuto
+    McpSvc -->|"tools/list"| Servers
+    McpSvc --> Val
+    SyncAll --> RagAuto
+    RagAuto -->|"fetch schemas"| Domain
+```
+
+### Idempotent RAG Ingestion
+
+Auto-ingested documents use deterministic IDs to prevent duplication on re-ingestion:
+
+| Document Type | ID Prefix | Example |
+|---------------|-----------|---------|
+| Tool schema | `auto-tool:` | `auto-tool:generate_report` |
+| Report schema | `auto-report:` | `auto-report:revenue` |
+| Manual (user) | UUID | `a1b2c3d4-...` |
+
+On re-ingestion, the service deletes all docs matching the `auto-tool:` or `auto-report:` prefix before inserting fresh ones. Manually ingested documents are never touched by the sync process.
+
+### Tool Cache Invalidation
+
+When refreshing a specific server, `McpClientService`:
+1. Removes all tools previously discovered from that server from `toolServerMap` and `allTools`
+2. Calls `tools/list` to get fresh data
+3. Adds the new tools back — ensuring no duplicates
+
+### Error Handling
+
+All sync operations are non-blocking and tolerate individual server failures:
+
+- If one MCP server is down during scheduled sync, the error is logged but the other server still syncs
+- If the Domain API is unreachable, report schema refresh is skipped with a warning
+- Admin endpoints always return a `SyncResult` with `success: false` and error details
 
 ---
 

@@ -41,12 +41,12 @@ mcp:
 #     - OpenRouter:    endpoint=https://openrouter.ai/api/v1, model=anthropic/claude-sonnet-4-20250514
 #
 llm:
-  provider: openai-compatible
+  provider: ${LLM_PROVIDER:mock}
   fallback-message: ${LLM_FALLBACK_MESSAGE:Sorry, I cannot help with this request.}
   openai:
-    endpoint: https://api.minimax.io/v1
-    api-key: sk-cp-caeVkXGEqujT-knAdUBdE_OiUqGFPfaArUj1h914wtaGoQYSqilQcS7CH8AeUR0ToQXNJIsSQtuwmi2fukBXc6e2iLIHKGmodQmGQ6nYr-YGlIm8RfQhTlo
-    model: MiniMax-M2.7
+    endpoint: ${LLM_ENDPOINT:https://api.openai.com/v1}
+    api-key: ${LLM_API_KEY:}
+    model: ${LLM_MODEL:gpt-4o}
 
 # Skills configuration — directory of Markdown files with frontmatter
 skills:
@@ -57,3 +57,12 @@ logging:
     com.example.gateway: DEBUG
     org.springframework.ai: DEBUG
     AUDIT: INFO
+
+# Domain API URL — used for RAG auto-ingestion of report schemas
+domain-api:
+  url: ${DOMAIN_API_URL:http://localhost:8082}
+
+# Periodic sync — re-discovers tools and refreshes RAG data
+sync:
+  interval-minutes: ${SYNC_INTERVAL_MINUTES:5}
+  initial-delay-minutes: ${SYNC_INITIAL_DELAY_MINUTES:10}
