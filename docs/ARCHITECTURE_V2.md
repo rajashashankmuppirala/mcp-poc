@@ -17,17 +17,20 @@ flowchart TD
     Gateway[Report Gateway :8080]
     LLM[LLM Provider]
     SkillReg[SkillRegistry]
+    RagStore[(RAG Knowledge Store\ntools + reports + docs)]
     MCPClient[MCP Client multi-server]
-    ReportsMCP[Reports MCP :8081<br/>GET /skills]
-    OpsMCP[Ops MCP Server :8083<br/>GET /skills]
+    ReportsMCP["Reports MCP :8081\nGET /skills"]
+    OpsMCP["Ops MCP Server :8083\nGET /skills"]
     ReportTools[ReportTools generate_report]
     OpsTools[OpsTools list_failed_jobs list_successful_dataflows]
     DomainAPI[Domain API :8082]
 
     User -->|types prompt| Browser
     Browser -->|POST /ai/request| Gateway
+    Gateway -->|retrieve relevant context| RagStore
+    RagStore -->|top-K chunks| Gateway
     Gateway -->|1. match skill| SkillReg
-    SkillReg -->|2. scoped tools + systemPrompt| LLM
+    SkillReg -->|2. scoped tools + systemPrompt + RAG context| LLM
     LLM -->|3. ToolCall JSON| Gateway
     Gateway -->|4. validate| Gateway
     Gateway -->|5. route to server| MCPClient
@@ -43,7 +46,7 @@ flowchart TD
     ReportsMCP -->|Streamable HTTP responses| MCPClient
     OpsMCP -->|Streamable HTTP responses| MCPClient
     MCPClient -->|Flux of rows| Gateway
-    Gateway -->|text/event-stream (SSE)| Browser
+    Gateway -->|"SSE to browser"| Browser
     Browser -->|renders rows| User
 ```
 
@@ -58,6 +61,8 @@ flowchart LR
     subgraph Gateway["Gateway Layer :8080"]
         AiCtrl["AiController\nPOST /ai/request\nGET /ai/tools\nGET /ai/skills\nPOST /ai/chart"]
         ConvCtrl["ConversationController\nGET /session/history\nPOST /session/clear\nGET /session/status"]
+        SyncCtrl["SyncController\nPOST /admin/sync/*"]
+        RagCtrl["DocumentIngestionController\nPOST/GET/DELETE /rag/documents"]
         InjDet["PromptInjectionDetector"]
         SkillReg["SkillRegistry\nmarkdown files\nkeyword matching"]
         SkillScope["Tool Scoping\nfilter by allowed_tools"]
@@ -66,8 +71,14 @@ flowchart LR
         McpSvc["MCP Client Service\nmulti-server routing"]
         AuditLog["AuditLogger\ncorrelation ID trail"]
         ConvSvc["ConversationService\nsession lifecycle"]
-        CtxInj["ContextInjector\nsliding window context"]
+        CtxInj["ContextInjectorImpl\nRAG + date + history"]
         SessStore[(SessionStore\nRedis / In-Memory)]
+        RagSvc["RagService\ningest, retrieve, delete"]
+        RagStore[(InMemoryRagStore\nConcurrentHashMap)]
+        RagAuto["RagAutoIngestionService\ndeterministic IDs"]
+        SyncSvc["SyncService\norchestrator"]
+        SyncSched["SyncScheduler\n@Scheduled 5min"]
+        ToolDisc["ToolDiscoveryInitializer\nstartup"]
     end
 
     subgraph Reports["Reports MCP Server :8081"]
@@ -82,7 +93,8 @@ flowchart LR
     end
 
     subgraph Domain["Domain API :8082"]
-        DomainCtrl["ReportStreamController\nStreamingResponseBody"]
+        DomainCtrl["ReportStreamController\nNDJSON streaming"]
+        MetaCtrl["ReportMetadataController\nGET /reports/metadata"]
     end
 
     UI --> AiCtrl
@@ -90,9 +102,18 @@ flowchart LR
     AiCtrl --> InjDet
     AiCtrl --> ConvSvc
     AiCtrl --> CtxInj
+    CtxInj --> RagSvc
     ConvCtrl --> ConvSvc
     ConvSvc --> SessStore
-    CtxInj --> ConvSvc
+    SyncCtrl --> SyncSvc
+    RagCtrl --> RagSvc
+    RagSvc --> RagStore
+    RagSvc --> RagAuto
+    SyncSvc --> RagAuto
+    SyncSvc --> McpSvc
+    SyncSched --> SyncSvc
+    ToolDisc --> McpSvc
+    ToolDisc --> RagAuto
     InjDet --> SkillReg
     SkillReg --> SkillScope
     SkillScope --> LLMProv
@@ -105,6 +126,7 @@ flowchart LR
     OpsToolList --> OpsData
     OpsToolDF --> OpsData
     RptStreamSvc -. HTTP POST .-> DomainCtrl
+    RagAuto -. GET /reports/metadata .-> MetaCtrl
 ```
 
 ### Deployment View
@@ -117,9 +139,11 @@ flowchart TD
 
     subgraph GatewayJVM["Gateway JVM :8080"]
         GApp["report-gateway.jar\nSpring Cloud Gateway WebFlux"]
-        GLLM["MockLlmProvider\nskill-aware"]
+        GLLM["LLM Provider\nskill-aware, RAG-aware"]
         GSkill["SkillRegistry\nmarkdown skill files"]
         GMcp["MCP Client SDK\nmulti-server routing"]
+        GRag["RAG Layer\nauto-ingest + keyword retrieval"]
+        GSync["Sync System\nscheduled + admin-triggered"]
     end
 
     subgraph ReportsJVM["Reports MCP Server JVM :8081"]
@@ -137,16 +161,20 @@ flowchart TD
     subgraph DomainJVM["Domain API JVM :8082"]
         DApp["domain-api.jar\nSpring Boot WebMVC"]
         DCtrl["ReportStreamController\nNDJSON streaming"]
+        DMeta["ReportMetadataController\nGET /reports/metadata"]
     end
 
     User -->|http://localhost:8080| GatewayJVM
     GatewayJVM -->|reports: :8081/mcp| ReportsJVM
     GatewayJVM -->|ops: :8083/mcp| OpsJVM
     ReportsJVM -->|:8082/api/v1| DomainJVM
+    GatewayJVM -. RAG auto-ingest .-> DMeta
 
     GatewayJVM -. contains .-> GLLM
     GatewayJVM -. contains .-> GSkill
     GatewayJVM -. contains .-> GMcp
+    GatewayJVM -. contains .-> GRag
+    GatewayJVM -. contains .-> GSync
     ReportsJVM -. contains .-> MTools
     ReportsJVM -. contains .-> MService
     OpsJVM -. contains .-> OTools
@@ -204,19 +232,19 @@ sequenceDiagram
     participant OMCP as Ops MCP :8083
 
     GW->>SR: Load skills from markdown files
-    Note over SR: Parse frontmatter: name, triggers,<br/>mcp_server, allowed_tools
+    Note over SR: Parse frontmatter: name, triggers, mcp_server, allowed_tools
     SR-->>GW: 3 skills loaded
 
     GW->>RMCP: GET /skills
     RMCP-->>GW: [{name: "report_analyst", ...}, {name: "chart_builder", ...}]
     GW->>SR: validateAgainstServer("reports", serverSkills)
-    Note over SR: Compare local vs server tools<br/>Log warnings for mismatches
+    Note over SR: Compare local vs server tools, log warnings for mismatches
 
     GW->>OMCP: GET /skills
     OMCP-->>GW: [{name: "operations_monitor", ...}]
     GW->>SR: validateAgainstServer("ops", serverSkills)
 
-    Note over GW,SR: Any server-only skills (not in local<br/>markdown) are auto-registered
+    Note over GW,SR: Any server-only skills (not in local markdown) are auto-registered
 ```
 
 **Validation behavior**:
@@ -275,20 +303,20 @@ sequenceDiagram
     participant RMCP as Reports MCP :8081
     participant DA as Domain API :8082
 
-    User->>GW: POST /ai/request<br/>{"prompt": "Show me revenue for us-east"}
+    User->>GW: POST /ai/request {prompt: "Show me revenue for us-east"}
     Note over GW,SR: Step 1: Injection check
     Note over GW,SR: Step 2: Skill matching
     GW->>SR: matchSkill("Show me revenue for us-east")
     Note over SR: Scans "revenue" against triggers
-    SR-->>GW: report_analyst<br/>allowed_tools: [generate_report]<br/>systemPrompt: "You are a business..."
+    SR-->>GW: report_analyst, tools: [generate_report]
 
     Note over GW,LLM: Step 3: LLM call with scoped tools
     GW->>LLM: generateToolCall(prompt, [generate_report], systemPrompt)
-    LLM-->>GW: ToolCall(tool="generate_report",<br/>params={reportType:"revenue", region:"us-east"})
+    LLM-->>GW: ToolCall(tool="generate_report", params={reportType:"revenue", region:"us-east"})
 
     Note over GW,Val: Step 4: Validate
     GW->>Val: validate(toolCall)
-    Note right of Val: tool in allowlist? yes<br/>region matches regex? yes
+    Note right of Val: tool in allowlist? yes, region matches regex? yes
     Val-->>GW: valid
 
     Note over GW,DA: Step 5: Execute via MCP
@@ -301,7 +329,7 @@ sequenceDiagram
     MC-->>GW: Flux of parsed rows
 
     Note over GW,User: Step 6: Stream to browser
-    GW-->>User: text/event-stream (SSE)<br/>data:row1,data-1,ts<br/>data:row2,data-2,ts<br/>...
+    GW-->>User: SSE text/event-stream: row1,data-1,ts
 ```
 
 ---
@@ -322,16 +350,16 @@ sequenceDiagram
     participant OMCP as Ops MCP :8083
     participant OpsData as OpsDataService
 
-    User->>GW: POST /ai/request<br/>{"prompt": "Show me failed jobs in last 24 hours"}
+    User->>GW: POST /ai/request {prompt: "Show me failed jobs"}
 
     Note over GW,SR: Step 1: Skill matching
     GW->>SR: matchSkill("failed jobs")
-    Note over SR: "failed" and "jobs" match<br/>operations_monitor triggers
-    SR-->>GW: operations_monitor<br/>allowed_tools: [list_failed_jobs, list_successful_dataflows]<br/>systemPrompt: "You are an operations..."
+    Note over SR: "failed" and "jobs" match operations_monitor triggers
+    SR-->>GW: operations_monitor, tools: [list_failed_jobs, list_successful_dataflows]
 
     Note over GW,LLM: Step 2: LLM sees only ops tools
     GW->>LLM: generateToolCall(prompt, [list_failed_jobs, list_successful_dataflows], systemPrompt)
-    Note over LLM: "failed jobs" + keyword match<br/>-> list_failed_jobs(hours: 24)
+    Note over LLM: "failed jobs" + keyword match -> list_failed_jobs(hours: 24)
     LLM-->>GW: ToolCall(tool="list_failed_jobs", params={hours:24})
 
     Note over GW,Val: Step 3: Validate
@@ -366,7 +394,7 @@ sequenceDiagram
     participant RMCP as Reports MCP :8081
     participant DA as Domain API :8082
 
-    User->>GW: POST /ai/request<br/>{"prompt": "Download revenue report"}
+    User->>GW: POST /ai/request {prompt: "Download revenue report"}
     GW->>SR: matchSkill("Download revenue report")
     SR-->>GW: report_analyst (tools: [generate_report])
     GW->>LLM: generateToolCall(prompt, [generate_report], systemPrompt)
@@ -379,8 +407,8 @@ sequenceDiagram
     RMCP-->>MC: JSON-RPC result
     MC-->>GW: Flux of rows
 
-    Note over GW: Detects "download" in prompt<br/>prepends filename as first SSE event to browser
-    GW-->>User: data:generate_report-1778128768955.csv<br/>data:row1,data-1,ts<br/>data:row2,data-2,ts<br/>...
+    Note over GW: Detects "download" in prompt, prepends filename as first SSE event
+    GW-->>User: SSE: generate_report-1778128768955.csv, row1, row2, ...
 ```
 
 ---
@@ -404,15 +432,15 @@ sequenceDiagram
     participant RMCP as Reports MCP :8081
     participant DA as Domain API :8082
 
-    User->>GW: POST /ai/chart<br/>{"prompt": "Show me a bar chart of revenue by region"}
+    User->>GW: POST /ai/chart {prompt: "Show me a bar chart of revenue by region"}
     GW->>SR: matchSkill("bar chart of revenue")
-    Note over SR: "bar chart" and "revenue" match<br/>chart_builder triggers
-    SR-->>GW: chart_builder<br/>allowed_tools: [generate_report,<br/>list_failed_jobs, list_successful_dataflows]
+    Note over SR: "bar chart" and "revenue" match chart_builder triggers
+    SR-->>GW: chart_builder, tools: [generate_report, ...]
 
     Note over GW,Chart: Phase 1: Planning
     GW->>Chart: planDataQuery(prompt, tools, systemPrompt)
     Chart->>LLM: "Respond with ONLY a tool call..."
-    LLM-->>Chart: ToolCall(tool="generate_report",<br/>params={reportType:"revenue"})
+    LLM-->>Chart: ToolCall(tool="generate_report", params={reportType:"revenue"})
     Chart-->>GW: ToolCall (planned)
 
     Note over GW,Val: Phase 2a: Validate & Fetch Data
@@ -432,9 +460,7 @@ sequenceDiagram
     Chart-->>GW: ChartResponse(vegaLiteSpec)
 
     Note over GW,User: Step 6: Return as JSON (not SSE)
-    GW-->>User: 200 application/json<br/>{"chartType":"bar","title":"Revenue by Region",<br/>"vegaLiteSpec":{...},"dataSummary":"..."}
-```
-    GW-->>User: event:chart-meta<br/>data:{"chartType":"bar","title":"Revenue by Region"}<br/>event:chart-spec<br/>data:{"$schema":"...","mark":"bar",...}
+    GW-->>User: 200 application/json {chartType:"bar", title:"Revenue by Region", vegaLiteSpec:{...}}
 ```
 
 ### How It Works
@@ -492,7 +518,7 @@ sequenceDiagram
     SR->>FS: scan *.md files
     FS-->>SR: report_analyst.md, operations_monitor.md, chart_builder.md
     SR->>SR: Parse frontmatter + markdown body
-    Note over SR: name, description, triggers<br/>mcp_server, allowed_tools<br/>systemPrompt = markdown body
+    Note over SR: name, description, triggers, mcp_server, allowed_tools, systemPrompt = markdown body
 
     Note over Spring,OMCP: Phase 2: Discover tools from MCP servers
     Spring->>MC: ToolDiscoveryInitializer.run()
@@ -500,13 +526,13 @@ sequenceDiagram
     MC->>OMCP: tools/list (MCP protocol)
     RMCP-->>MC: [generate_report {schema...}]
     OMCP-->>MC: [list_failed_jobs, list_successful_dataflows]
-    MC->>MC: Build toolServerMap:<br/>generate_report -> reports<br/>list_failed_jobs -> ops<br/>list_successful_dataflows -> ops
+    MC->>MC: Build toolServerMap: generate_report->reports, list_failed_jobs->ops
 
     Note over Spring,OMCP: Phase 3: Validate skills against servers
     MC->>RMCP: GET /skills
     RMCP-->>MC: [report_analyst, chart_builder]
     MC->>SR: validateAgainstServer("reports", skills)
-    Note over SR: Compare local vs server tools<br/>Log warnings for mismatches
+    Note over SR: Compare local vs server tools, log warnings for mismatches
 
     MC->>OMCP: GET /skills
     OMCP-->>MC: [operations_monitor]
@@ -546,13 +572,13 @@ sequenceDiagram
     participant Tools as Registered Tools
 
     Note over Client,Tools: Phase 1: Connection Setup
-    Client->>Transport: POST /mcp<br/>{"method": "initialize",<br/>"protocolVersion": "2025-03-26"}
+    Client->>Transport: POST /mcp {method: "initialize", protocolVersion: "2025-03-26"}
     Transport->>Server: Forward JSON-RPC
     Server-->>Transport: 200 OK + Mcp-Session-Id header
     Transport-->>Client: ServerCapabilities + Session ID
 
     Note over Client,Tools: Phase 2: Tool Discovery
-    Client->>Transport: POST /mcp<br/>{"method": "tools/list"}
+    Client->>Transport: POST /mcp {method: "tools/list"}
     Transport->>Server: Forward with session header
     Server->>Tools: Scan @McpTool methods
     Tools-->>Server: tool definitions with JSON schemas
@@ -571,14 +597,14 @@ sequenceDiagram
     participant Tool as Tool Handler
     participant Backend as Backend Service
 
-    Client->>Transport: POST /mcp<br/>{"method": "tools/call",<br/>"params": {"name": "generate_report",<br/>"arguments": {"reportType": "revenue"}}}
+    Client->>Transport: POST /mcp {method: "tools/call", name: "generate_report"}
     Transport->>Server: Forward with session header
     Server->>Tool: invoke generate_report()
     Tool->>Backend: call backend API
     Backend-->>Tool: response data
     Tool-->>Server: List of String results
     Server-->>Transport: JSON-RPC result (Streamable HTTP)
-    Transport-->>Client: data:{"jsonrpc": "2.0",<br/>"id": 2, "result": {...}}
+    Transport-->>Client: data:{jsonrpc: "2.0", id: 2, result: {...}}
 ```
 
 ---
@@ -774,12 +800,19 @@ MCP Server → Domain API (Bearer token)
 | Ops Skills | `ops-mcp-server/.../controller/SkillsController.java` | GET /skills — exposes operations_monitor |
 | Ops Data Service | `ops-mcp-server/.../service/OpsDataService.java` | Simulated failed job and dataflow data |
 | Domain Controller | `domain-api/.../controller/ReportStreamController.java` | NDJSON streaming |
+| Domain Controller | `domain-api/.../controller/ReportMetadataController.java` | GET /api/v1/reports/metadata — report schemas |
 | Frontend | `report-gateway/.../static/index.html` | Chat UI with SSE parsing |
 | RAG Models | `report-gateway/.../model/KnowledgeDocument.java` | Document record with auto-chunking |
 | RAG Models | `report-gateway/.../model/DocumentChunk.java` | Chunked text with keyword extraction |
+| RAG Models | `report-gateway/.../model/ReportSchema.java` | Mirror model for Domain API report metadata |
 | RAG Service | `report-gateway/.../service/RagService.java` | Interface for document management |
-| RAG Service | `report-gateway/.../service/InMemoryRagStore.java` | ConcurrentHashMap-backed store |
-| RAG Controller | `report-gateway/.../controller/DocumentIngestionController.java` | CRUD endpoints for documents |
+| RAG Service | `report-gateway/.../service/InMemoryRagStore.java` | ConcurrentHashMap-backed store with keyword retrieval |
+| RAG Service | `report-gateway/.../service/RagAutoIngestionService.java` | Auto-ingests tool/report schemas with deterministic IDs |
+| RAG Controller | `report-gateway/.../controller/DocumentIngestionController.java` | CRUD endpoints for manual documents |
+| Sync Service | `report-gateway/.../service/SyncService.java` | Orchestrates tool + RAG sync across servers |
+| Sync Controller | `report-gateway/.../controller/SyncController.java` | Admin endpoints: POST /admin/sync/* |
+| Sync Scheduler | `report-gateway/.../config/SyncScheduler.java` | @Scheduled periodic sync (every 5 min) |
+| Tool Discovery | `report-gateway/.../config/ToolDiscoveryInitializer.java` | Discovers tools + triggers RAG auto-ingestion at startup |
 
 ---
 
@@ -950,33 +983,33 @@ sequenceDiagram
 
     Note over User,Browser: Turn 1: Initial Request
     User->>Browser: "Show me revenue for last year"
-    Browser->>GW: POST /ai/chart<br/>{"prompt": "..."}<br/>Cookie: session-id=abc-123
+    Browser->>GW: POST /ai/chart, Cookie: session-id=abc-123
     GW->>CS: loadOrCreateSession("abc-123")
     CS->>SS: find("abc-123")
     SS-->>CS: null (new session)
     CS-->>GW: new SessionContext
-    GW->>LLM: generateToolCall(prompt, tools, systemPrompt)<br/>[no context yet]
-    LLM-->>GW: ToolCall(tool="generate_report",<br/>params={reportType:"revenue", startDate:"2025-01-01", endDate:"2025-12-31"})
+    GW->>LLM: generateToolCall(prompt, tools, systemPrompt) [no context yet]
+    LLM-->>GW: ToolCall(tool="generate_report", params={reportType:"revenue", dates:2025})
     GW->>CS: saveTurn(session, turn)
     CS->>SS: save(session with Turn 1)
     SS-->>CS: session persisted
-    GW-->>Browser: 200 OK<br/>X-Session-ID: abc-123<br/>ChartResponse
+    GW-->>Browser: 200 OK, X-Session-ID: abc-123, ChartResponse
     Browser-->>User: Renders bar chart
 
     Note over User,Browser: Turn 2: Follow-Up with Context
     User->>Browser: "Show it as a pie chart"
-    Browser->>GW: POST /ai/chart<br/>{"prompt": "Show it as a pie chart"}<br/>Cookie: session-id=abc-123
+    Browser->>GW: POST /ai/chart, Cookie: session-id=abc-123
     GW->>CS: loadOrCreateSession("abc-123")
     CS->>SS: find("abc-123")
-    SS-->>CS: Session with Turn 1<br/>(revenue, 2025 dates)
+    SS-->>CS: Session with Turn 1 (revenue, 2025 dates)
     GW->>CI: buildContextPrompt("Show it as a pie chart", session)
-    CI-->>GW: Context prompt with history:<br/>"=== Date Reference ===<br/>=== Conversation History ===<br/>User: Show me revenue...<br/>[Filters: reportType=revenue...]<br/>=== Current Request ===<br/>User: Show it as a pie chart"
+    CI-->>GW: Context prompt with history and filters
     GW->>LLM: generateToolCall(contextPrompt, tools, systemPrompt)
-    Note over LLM: LLM sees previous filters<br/>and inherits reportType, dates
-    LLM-->>GW: ToolCall(tool="generate_report",<br/>params={reportType:"revenue", startDate:"2025-01-01", endDate:"2025-12-31"})
+    Note over LLM: LLM sees previous filters, inherits reportType and dates
+    LLM-->>GW: ToolCall(tool="generate_report", params={reportType:"revenue", dates:2025})
     GW->>CS: saveTurn(session, turn)
     CS->>SS: save(session with Turn 2)
-    GW-->>Browser: 200 OK<br/>ChartResponse (pie chart)
+    GW-->>Browser: 200 OK, ChartResponse (pie chart)
     Browser-->>User: Renders pie chart
 ```
 
@@ -1152,12 +1185,13 @@ flowchart TD
 
 | Component | Responsibility | Implementation |
 |-----------|---------------|----------------|
-| **RagService** | Interface for document management | `ingest()`, `retrieve()`, `getById()`, `listAll()`, `delete()`, `clear()` |
+| **RagService** | Interface for document management | `ingest()`, `ingestWithId()`, `retrieve()`, `getById()`, `listAll()`, `delete()`, `clear()` |
 | **InMemoryRagStore** | POC storage implementation | `ConcurrentHashMap` with keyword overlap scoring |
-| **KnowledgeDocument** | Immutable document record | `id`, `title`, `content`, `tags`, `createdAt`, `chunks[]` |
+| **KnowledgeDocument** | Immutable document record with auto-chunking | `id`, `title`, `content`, `tags`, `createdAt`, `chunks[]` |
 | **DocumentChunk** | Chunked text with keywords | `documentId`, `chunkIndex`, `text`, `keywords[]` |
-| **DocumentIngestionController** | REST API for document CRUD | `POST/GET/DELETE /rag/documents` |
-| **ContextInjectorImpl** | RAG context injection | `retrieveRagContext()` called in `buildContextPrompt()` |
+| **DocumentIngestionController** | REST API for manual document CRUD | `POST/GET/DELETE /rag/documents` |
+| **RagAutoIngestionService** | Auto-ingests tool schemas + report metadata | Deterministic IDs (`auto-tool:`, `auto-report:`) for idempotent re-ingestion |
+| **ContextInjectorImpl** | RAG + conversation context injection | `retrieveRagContext()` + `buildContextPrompt()` with sliding window |
 
 ### Prompt Assembly Order
 
@@ -1306,3 +1340,7 @@ All sync operations are non-blocking and tolerate individual server failures:
 | **How does context injection work?** | Previous turns prepended to LLM prompts with sliding window (last 8 turns) |
 | **Where are sessions stored?** | Redis for production, ConcurrentHashMap for local dev — both implement SessionStore interface |
 | **How do follow-up requests work?** | User references like "it" resolve via context — filters inherit from previous turns |
+| **What is the RAG layer?** | Keyword-based document retrieval that injects domain knowledge into LLM prompts |
+| **How are RAG docs populated?** | Auto-ingested at startup (tool schemas + report metadata) + manual upload via API |
+| **How does sync prevent staleness?** | Three triggers: startup, scheduled (5 min), admin endpoint — re-discovers tools and re-ingests RAG docs |
+| **How is idempotent ingestion achieved?** | Deterministic IDs (`auto-tool:`, `auto-report:`) — re-ingestion deletes old prefix-matching docs first |
